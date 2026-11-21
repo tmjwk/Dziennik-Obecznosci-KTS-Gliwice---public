@@ -78,7 +78,7 @@
 
     /* ---------- lista zawodników: siatka 2–3 kolumny (ekran 9:16) ---------- */
     .lista {
-      padding: 4px 10px 90px; max-width: 720px; margin: 0 auto;
+      padding: 4px 10px 120px; max-width: 720px; margin: 0 auto;
       display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
       gap: 8px; align-items: stretch;
     }
@@ -128,9 +128,10 @@
     .stopka {
       position: fixed; bottom: 0; left: 0; right: 0;
       background: var(--karta); border-top: 1px solid var(--linia);
-      padding: 8px 14px calc(8px + env(safe-area-inset-bottom));
-      display: flex; gap: 8px; justify-content: center; z-index: 10;
+      padding: 6px 14px calc(8px + env(safe-area-inset-bottom));
+      display: flex; flex-direction: column; align-items: center; z-index: 10;
     }
+    .stopka .wiersz { display: flex; gap: 8px; justify-content: center; width: 100%; }
     .stopka button {
       flex: 1 1 0; max-width: 240px;
       background: var(--tlo); color: var(--tekst);
@@ -138,7 +139,7 @@
       padding: 12px 8px; font-size: .92rem; cursor: pointer; min-height: 48px;
     }
     .stopka button.on { background: var(--akcent); color: var(--akcent-c); border-color: var(--akcent); font-weight: 700; }
-    .wersja { text-align: center; color: var(--szary); font-size: .75rem; padding: 14px 0 4px; }
+    .wersja { text-align: center; color: var(--szary); font-size: .75rem; padding: 0 0 4px; }
 
     /* ---------- modalne ---------- */
     .tlo-modal {
@@ -406,11 +407,13 @@ function renderuj() {
       (lista.length === 0 ? '<p class="oplucie" style="text-align:center">Brak zawodników spełniających kryteria.</p>' : '') +
     '</div>' +
     '<div class="stopka">' +
-      '<button class="on" id="stopka-obecnosc">📋 Obecność</button>' +
-      '<button id="stopka-czlonkowie">👥 Członkowie</button>' +
-    '</div>' +
-    '<p class="wersja">' + (DEMO ? '<span class="demo">TRYB DEMO — dane przykładowe</span> · ' : '') +
-      esc(S.stan.email) + ' · ' + WERSJA_UI + '</p>';
+      '<p class="wersja">' + (DEMO ? '<span class="demo">TRYB DEMO — dane przykładowe</span> · ' : '') +
+        esc(S.stan.email) + ' · ' + WERSJA_UI + '</p>' +
+      '<div class="wiersz">' +
+        '<button class="on" id="stopka-obecnosc">📋 Obecność</button>' +
+        '<button id="stopka-czlonkowie">👥 Członkowie</button>' +
+      '</div>' +
+    '</div>';
 
   app.innerHTML = html;
   podpinz();
@@ -591,11 +594,13 @@ function renderujCzlonkow(app) {
       (nieaktywni.length ? '<p class="oplucie">Osoby nieaktywne nie pojawiają się na liście obecności; ich historia zostaje.</p>' : '') +
     '</div>' +
     '<div class="stopka">' +
-      '<button id="stopka-obecnosc">📋 Obecność</button>' +
-      '<button class="on" id="stopka-czlonkowie">👥 Członkowie</button>' +
-    '</div>' +
-    '<p class="wersja">' + (DEMO ? '<span class="demo">TRYB DEMO — dane przykładowe</span> · ' : '') +
-      esc(S.stan.email) + ' · ' + WERSJA_UI + '</p>';
+      '<p class="wersja">' + (DEMO ? '<span class="demo">TRYB DEMO — dane przykładowe</span> · ' : '') +
+        esc(S.stan.email) + ' · ' + WERSJA_UI + '</p>' +
+      '<div class="wiersz">' +
+        '<button id="stopka-obecnosc">📋 Obecność</button>' +
+        '<button class="on" id="stopka-czlonkowie">👥 Członkowie</button>' +
+      '</div>' +
+    '</div>';
 
   podpinzCzlonkow();
 }
