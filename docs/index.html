@@ -74,6 +74,12 @@
       padding: 8px 14px; font-size: .88rem; min-height: 42px; cursor: pointer;
     }
     .grupy button.on { background: var(--akcent); color: var(--akcent-c); border-color: var(--akcent); font-weight: 700; }
+    /* r24: przycisk ＋ (dodaj/edytuj grupy z apki) — wyróżniony, ale nie myli
+     * się z grupą: kropkowany obrys, akcent dopiero na hover/aktywności */
+    .grupy button.grupa-nowa {
+      border-style: dashed; border-color: var(--akcent); color: var(--akcent);
+      background: transparent; font-weight: 700;
+    }
 
     /* ---------- lista zawodników: siatka 2–3 kolumny (ekran 9:16) ---------- */
     .lista {

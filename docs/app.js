@@ -1,5 +1,5 @@
 /* =================================================================
- * Dziennik Obecności KTS Gliwice — frontend v0.2.2
+ * Dziennik Obecności KTS Gliwice — frontend v0.2.4
  * Przepływ (instrukcja właściciela, runda 17):
  *   1) użytkownik wchodzi na https://tmjwk.github.io/Dziennik-Obecznosci-
  *      KTS-Gliwice---public/ (strona hostowana na GitHub Pages),
@@ -15,7 +15,7 @@
 
 'use strict';
 
-var WERSJA_UI = 'v0.2.3';
+var WERSJA_UI = 'v0.2.4';
 
 /* r19: komunikat gdy wdrożenie ma dostęp „tylko ja" (401) — mówi
  * właścicielowi DOKŁADNIE co kliknąć (bez żargonu) */
@@ -208,6 +208,11 @@ function renderuj() {
       S.stan.grupy.map(function (g) {
         return przyciskGrupy(g.kod, g.nazwa || g.kod);
       }).join('') +
+      // r24: zarządzanie grupami z apki („zmiany tylko przez apkę");
+      // puste grupy w arkuszu = ten jedyny przycisk zamiast pustego paska
+      (S.stan.grupy.length === 0
+        ? '<button data-grupa="__nowa" class="grupa-nowa" title="Dodaj pierwszą grupę">＋ Dodaj grupę</button>'
+        : '<button data-grupa="__nowa" class="grupa-nowa" title="Dodaj grupę">＋</button>') +
     '</div>' +
     '<div class="lista">' +
       lista.map(kafelHtml).join('') +
@@ -227,6 +232,65 @@ function renderuj() {
 
 function przyciskGrupy(kod, etykieta) {
   return '<button data-grupa="' + esc(kod) + '" class="' + (S.grupa === kod ? 'on' : '') + '">' + esc(etykieta) + '</button>';
+}
+
+/* r24: modal dodania/edycji grupy. Nowa grupa → dodajGrupe; istniejąca
+ * → edytujGrupe (kod nietykalny — odnoszą się do niego uczestnicy).
+ * Usuwanie: tylko istniejącej, z potwierdzeniem i liczbą zawodników. */
+function modalGrupy(g) {
+  var nowa = !g;
+  var tlo = document.createElement('div');
+  tlo.className = 'tlo-modal';
+  tlo.innerHTML =
+    '<div class="modal">' +
+      '<h2>' + (nowa ? '＋ Dodaj grupę' : 'Grupa ' + esc(g.kod)) + '</h2>' +
+      (nowa ? '<label>Kod grupy (np. GR1)</label>' +
+        '<input id="f-gkod" placeholder="GR1" autocomplete="off" spellcheck="false">' : '') +
+      '<label>Nazwa (opcjonalnie)</label>' +
+      '<input id="f-gnazwa" placeholder="np. Środa początkujący" value="' + esc(nowa ? '' : (g.nazwa || '')) + '" autocomplete="off">' +
+      '<label>Dni treningów (opcjonalnie)</label>' +
+      '<input id="f-gdni" placeholder="np. pn, śr, czw" value="' + esc(nowa ? '' : (g.dni || '')) + '" autocomplete="off">' +
+      '<div class="przyciski">' +
+        (nowa ? '' : '<button class="btn-drugi" id="f-gusun" style="color:var(--blad)">Usuń grupę</button>') +
+        '<button class="btn-drugi" id="f-ganuluj">Anuluj</button>' +
+        '<button class="btn-glowny" id="f-gzapisz">' + (nowa ? 'Dodaj' : 'Zapisz') + '</button>' +
+      '</div>' +
+    '</div>';
+  document.body.appendChild(tlo);
+  tlo.querySelector('#f-ganuluj').addEventListener('click', function () { tlo.remove(); });
+
+  if (!nowa) {
+    tlo.querySelector('#f-gusun').addEventListener('click', function () {
+      var ile = S.stan.zawodnicy.filter(function (z) { return z.grupa === g.kod && z.aktywny; }).length;
+      if (!confirm('Usunąć grupę ' + g.kod + (g.nazwa ? ' (' + g.nazwa + ')' : '') + '?\n' +
+          'Zawodników w tej grupie: ' + ile + '.\n' +
+          'Zawodnicy zostają w arkuszu — przydzielisz ich do innej grupy przy edycji.')) return;
+      wywolaj('usunGrupe', { token: TOKEN, kod: g.kod }, function (e, w) {
+        tlo.remove();
+        if (e) { alert('Błąd: ' + e.message); return; }
+        if (!w.ok) { obsluzBlad(null, w); return; }
+        if (S.grupa === g.kod) S.grupa = '*';
+        odswiezStan();
+      });
+    });
+  }
+
+  tlo.querySelector('#f-gzapisz').addEventListener('click', function () {
+    var kod = nowa
+      ? (tlo.querySelector('#f-gkod').value || '').trim().toUpperCase().replace(/\s+/g, '')
+      : g.kod;
+    var nazwa = (tlo.querySelector('#f-gnazwa').value || '').trim();
+    var dni = (tlo.querySelector('#f-gdni').value || '').trim();
+    if (!kod) { alert('Podaj kod grupy (np. GR1).'); return; }
+    var zakoncz = function (e, w) {
+      if (e) { alert('Błąd zapisu: ' + e.message); return; }
+      if (!w.ok) { obsluzBlad(null, w); return; }
+      tlo.remove();
+      odswiezStan();
+    };
+    if (nowa) wywolaj('dodajGrupe', { token: TOKEN, kod: kod, nazwa: nazwa, dni: dni }, zakoncz);
+    else wywolaj('edytujGrupe', { token: TOKEN, kod: kod, nazwa: nazwa, dni: dni }, zakoncz);
+  });
 }
 
 function widoczni() {
@@ -455,6 +519,12 @@ function modalDodajEdytuj(z) {
   if (z && z.grupa && kody.indexOf(z.grupa) === -1) {
     grupyOpcje.push({ kod: z.grupa, nazwa: '' });
   }
+  // r24: brak grup w arkuszu → nie da się dodać członka (grupa wymagana);
+  // kierujemy na ＋ zamiast cichego domyślnego GR1 (apka = jedyny interfejs)
+  if (grupyOpcje.length === 0) {
+    alert('Najpierw dodaj grupę (przycisk ＋ na liście obecności), potem dodawaj zawodników.');
+    return;
+  }
   tlo.innerHTML =
     '<div class="modal">' +
       '<h2>' + (z ? 'Edytuj członka' : 'Dodaj członka') + '</h2>' +
@@ -494,7 +564,10 @@ function modalDodajEdytuj(z) {
       ? tlo.querySelector('#f-nowa').value.trim().toUpperCase().replace(/\s+/g, '')
       : sel.value;
     if (!imie || !nazwisko) { alert('Imię i nazwisko są wymagane.'); return; }
-    if (!grupa) grupa = 'GR1';
+    // r24: grupa JAWNIE wymagana — bez cichego domyślnego GR1 (grupy
+    // prowadzi wyłącznie arkusz Grupy, apka niczego nie wymyśla)
+    if (sel.value === '__nowa' && !grupa) { alert('Podaj kod nowej grupy (np. GR1).'); return; }
+    if (!grupa) { alert('Wybierz grupę (albo utwórz nową).'); return; }
 
     var zakoncz = function (e, w) {
       tlo.remove();
@@ -580,7 +653,16 @@ function podpinz() {
 
   document.querySelectorAll('.grupy button').forEach(function (b) {
     b.addEventListener('click', function () {
-      S.grupa = this.getAttribute('data-grupa');
+      var kod = this.getAttribute('data-grupa');
+      if (kod === '__nowa') { modalGrupy(null); return; } // r24: ➕ w pasku grup
+      // r24: tap w JUŻ wybrany przycisk = edycja grupy (filtr jest aktywny,
+      // to nie pomyli się z przełączaniem; "*" nie edytujemy)
+      if (kod !== '*' && S.grupa === kod) {
+        var g = null;
+        S.stan.grupy.forEach(function (x) { if (x.kod === kod) g = x; });
+        if (g) { modalGrupy(g); return; }
+      }
+      S.grupa = kod;
       renderuj();
     });
   });
