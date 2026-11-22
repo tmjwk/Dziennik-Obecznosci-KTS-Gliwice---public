@@ -27,16 +27,20 @@ var PRZYCISK_DOSTEP =
 /* ------------------------------------------------ konfiguracja (config.js + localStorage + #hash) */
 var K = (function () {
   var dane = { API: '', KLUCZ: '' };
+  // plik config.js = wgłębiona konfiguracja strony (r19: to co Zet wgrywa
+  // na stałe do GitHuba jest źródłem prawdy dla wszystkich odwiedzających)
+  if (typeof KONFIG === 'object' && KONFIG) {
+    if (KONFIG.API) dane.API = String(KONFIG.API);
+    if (KONFIG.KLUCZ) dane.KLUCZ = String(KONFIG.KLUCZ);
+  }
+  // localStorage (karta ustawień / link z hashem) wygrywa TYLKO gdy
+  // sensowny format — śmieć (np. backtick z r17) nie może blokować
+  // wgłębionego configu po stronie właściciela
   try {
     var zapisane = JSON.parse(localStorage.getItem('konfig') || '{}');
-    if (zapisane.API) dane.API = String(zapisane.API);
-    if (zapisane.KLUCZ) dane.KLUCZ = String(zapisane.KLUCZ);
+    if (/^https:\/\/.+\/exec$/.test(String(zapisane.API || ''))) dane.API = String(zapisane.API);
+    if (/^[\w.-]+\.apps\.googleusercontent\.com$/.test(String(zapisane.KLUCZ || ''))) dane.KLUCZ = String(zapisane.KLUCZ);
   } catch (ign) { }
-  // plik config.js (dostarczony przez właściciela przy publikacji)
-  if (typeof KONFIG === 'object' && KONFIG) {
-    if (!dane.API && KONFIG.API) dane.API = String(KONFIG.API);
-    if (!dane.KLUCZ && KONFIG.KLUCZ) dane.KLUCZ = String(KONFIG.KLUCZ);
-  }
   // link dla trenerów: …/#api=…&klucz=… (zapisujemy raz, potem z hashu można
   // korzystać wielokrotnie — hash nie zostaje w historii przeglądarki)
   var czesci = (location.hash || '').replace(/^#/, '').split('&');
@@ -79,14 +83,14 @@ function wywolaj(akcja, dane, cb) {
     // Apps Script odpowiada JSON-em; zły adres potrafi zwrócić stronę
     // HTML (np. 404) — wtedy czytelny komunikat, nie „JSON.parse:…"
     return odp.text();
-  }).then(function (tekst, nieJsonInfo) {
+  }).then(function (tekst) {
     var wynik;
     try { wynik = JSON.parse(tekst); }
     catch (nieJson) {
-      // r19: Apps Script z dostępem „tylko ja" odsyła stronę logowania
-      // Google (HTML) — 401. API Apps Script nie wystawia statusu, ale
-      // treść zaczyna się od „<!DOCTYPE" i zawiera „accounts.google.com"
-      if (/^\s*<!DOCTYPE/i.test(tekst) && /accounts\.google\.com|googleusercontent/i.test(tekst)) {
+      // r19: Apps Script z dostępem „tylko ja" odsyła stronę HTML (401)
+      // — poznamy po sygnaturze Google, gdy treść jest czytelna
+      if (/^\s*<!DOCTYPE/i.test(tekst) &&
+          /ppConfig|accounts\.google\.com|googleusercontent|ServiceLogin/i.test(tekst)) {
         cb(null, { ok: false, blad: 'DOSTEP_ZABRONIONY' });
         return;
       }
@@ -95,6 +99,13 @@ function wywolaj(akcja, dane, cb) {
     }
     cb(null, wynik);
   }).catch(function (bladSieci) {
+    // r19: Google przy 401 NIE wysyła nagłówków CORS → przeglądarka
+    // widzi zwykły błąd sieci. Adres w script.google.com + ten błąd
+    // = niemal na pewno wdrożenie z dostępem „tylko ja”.
+    if (/script\.google\.com/.test(K.API)) {
+      cb(null, { ok: false, blad: 'DOSTEP_ZABRONIONY' });
+      return;
+    }
     cb({ message: 'Brak połączenia z arkuszem (serwer nie odpowiada). Sprawdź internet i odśwież stronę; jeśli trwa to dłużej — zgłoś właścicielowi.' });
   });
 }
@@ -821,6 +832,17 @@ function pokazKonfiguracje() {
       if (e) {
         status.style.color = 'var(--blad)';
         status.textContent = '✗ ' + e.message;
+        return;
+      }
+      if (w && w.blad === 'DOSTEP_ZABRONIONY') {
+        // r19: przeglądarka nie odróżnia 401 (dostęp „tylko ja”) od
+        // nieistniejącego wdrożenia (Google w obu przypadkach blokuje
+        // CORS) — mówimy o obu możliwościach, po ludzku
+        status.style.color = 'var(--blad)';
+        status.textContent = '✗ Nie mogę się połączyć. Dwie najczęstsze przyczyny: ' +
+          '1) literówka w adresie (musi zaczynać się od https://script.google.com… i kończyć na /exec), ' +
+          '2) we wdrożeniu „Kto ma dostęp” stoi coś innego niż „Każdy” — zmień: Apps Script → Wdróż → ' +
+          'Zarządzaj wdrożeniami → ✎ → „Kto ma dostęp”: Każdy → Wdróż (adres się nie zmieni).';
         return;
       }
       if (!w || !w.ok) {
