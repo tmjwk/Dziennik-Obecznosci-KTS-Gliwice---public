@@ -22,6 +22,7 @@
  * ============================================================ */
 
 var KONFIG = {
-  API: '',   // <- adres wdrożenia (/exec)
-  KLUCZ: ''  // <- Client ID OAuth (…apps.googleusercontent.com)
+  // adres wdrożenia przesłany przez właściciela (runda 18, 2026-11-22)
+  API: 'https://script.google.com/macros/s/AKfycbyUE2KFmvbfOa2JcYfTJoMVzYvyEGHiprqTKKpGCzkBE8OZJbdeqR2m4q-WVeBhwWOZvg/exec',
+  KLUCZ: ''  // <- Client ID OAuth (…apps.googleusercontent.com) — czeka na właściciela
 };

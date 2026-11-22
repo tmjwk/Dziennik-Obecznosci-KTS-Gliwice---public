@@ -17,6 +17,13 @@
 
 var WERSJA_UI = 'v0.2.3';
 
+/* r19: komunikat gdy wdrożenie ma dostęp „tylko ja" (401) — mówi
+ * właścicielowi DOKŁADNIE co kliknąć (bez żargonu) */
+var PRZYCISK_DOSTEP =
+  'Arkusz (API) odpowiada, ale odrzuca stronę: wdrożenie ma ustawiony dostęp „tylko ja”. ' +
+  'Właścicielu: wejdź w Apps Script → Wdróż → Zarządzaj wdrożeniami → ołówek (✎) → ' +
+  '„Kto ma dostęp” na „Każdy” → Wdróż. Adres API się nie zmieni.';
+
 /* ------------------------------------------------ konfiguracja (config.js + localStorage + #hash) */
 var K = (function () {
   var dane = { API: '', KLUCZ: '' };
@@ -72,10 +79,17 @@ function wywolaj(akcja, dane, cb) {
     // Apps Script odpowiada JSON-em; zły adres potrafi zwrócić stronę
     // HTML (np. 404) — wtedy czytelny komunikat, nie „JSON.parse:…"
     return odp.text();
-  }).then(function (tekst) {
+  }).then(function (tekst, nieJsonInfo) {
     var wynik;
     try { wynik = JSON.parse(tekst); }
     catch (nieJson) {
+      // r19: Apps Script z dostępem „tylko ja" odsyła stronę logowania
+      // Google (HTML) — 401. API Apps Script nie wystawia statusu, ale
+      // treść zaczyna się od „<!DOCTYPE" i zawiera „accounts.google.com"
+      if (/^\s*<!DOCTYPE/i.test(tekst) && /accounts\.google\.com|googleusercontent/i.test(tekst)) {
+        cb(null, { ok: false, blad: 'DOSTEP_ZABRONIONY' });
+        return;
+      }
       cb({ message: 'Pod tym adresem nie ma naszego API — sprawdź, czy adres kończy się na /exec (Wdróż → Zarządzaj wdrożeniami → 🌐).' });
       return;
     }
@@ -828,6 +842,18 @@ function start() {
   // nie blokuje wejścia — braki pokazuje żółta kartka na ekranie
   // logowania, kartę ustawień otwiera właściciel linkiem na dole.
   if (TOKEN) { odswiezStan(); return; }
+  // jest API? → zdrowy ping (r19: wdrożenie z dostępem „tylko ja"
+  // odpowiada 401 — wykrywamy i mówimy właścicielowi, co poprawić,
+  // żeby trener nie widział tylko wiecznego kręcenia)
+  if (K.API) {
+    wywolaj('ping', {}, function (e, w) {
+      if (!e && w && w.ok) { pokazLogowanie(); return; }
+      pokazLogowanie(
+        (!e && w && w.blad === 'DOSTEP_ZABRONIONY') ? PRZYCISK_DOSTEP :
+        'Chwilowy problem z połączeniem z arkuszem — odśwież stronę za chwilę.');
+    });
+    return;
+  }
   pokazLogowanie();
 }
 
