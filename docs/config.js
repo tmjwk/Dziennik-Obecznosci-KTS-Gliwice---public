@@ -24,5 +24,7 @@
 var KONFIG = {
   // adres wdrożenia przesłany przez właściciela (runda 18, 2026-11-22)
   API: 'https://script.google.com/macros/s/AKfycbyUE2KFmvbfOa2JcYfTJoMVzYvyEGHiprqTKKpGCzkBE8OZJbdeqR2m4q-WVeBhwWOZvg/exec',
-  KLUCZ: ''  // <- Client ID OAuth (…apps.googleusercontent.com) — czeka na właściciela
+  // Client ID OAuth przesłany przez właściciela (runda 23, 2026-11-22);
+  // backend pieczętuje go sam przy pierwszym logowaniu (aud = CLIENT_ID)
+  KLUCZ: '721854294567-4shhuesqrg78pbhq96qtqueoqa18os8i.apps.googleusercontent.com'
 };
