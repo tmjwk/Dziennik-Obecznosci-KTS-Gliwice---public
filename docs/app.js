@@ -1,0 +1,769 @@
+/* =================================================================
+ * Dziennik Obecności KTS Gliwice — frontend v0.2.0
+ * Strona żyje na GitHub Pages; dane zapisuje w arkuszu Google
+ * przez API Apps Script (URL /exec). Logowanie: konto Google
+ * (Google Identity Services) — token weryfikuje API (aud + biała
+ * lista w arkuszu). Runda 15: „na git jest strona internetowa
+ * (frontend do zapisu danych w arkuszu)".
+ * ================================================================= */
+
+'use strict';
+
+var WERSJA_UI = 'v0.2.0';
+
+/* ------------------------------------------------ konfiguracja (config.js + localStorage + #hash) */
+var K = (function () {
+  var dane = { API: '', KLUCZ: '' };
+  try {
+    var zapisane = JSON.parse(localStorage.getItem('konfig') || '{}');
+    if (zapisane.API) dane.API = String(zapisane.API);
+    if (zapisane.KLUCZ) dane.KLUCZ = String(zapisane.KLUCZ);
+  } catch (ign) { }
+  // plik config.js (dostarczony przez właściciela przy publikacji)
+  if (typeof KONFIG === 'object' && KONFIG) {
+    if (!dane.API && KONFIG.API) dane.API = String(KONFIG.API);
+    if (!dane.KLUCZ && KONFIG.KLUCZ) dane.KLUCZ = String(KONFIG.KLUCZ);
+  }
+  // link dla trenerów: …/#api=…&klucz=… (zapisujemy raz, potem z hashu można
+  // korzystać wielokrotnie — hash nie zostaje w historii przeglądarki)
+  var czesci = (location.hash || '').replace(/^#/, '').split('&');
+  var zLinku = false;
+  czesci.forEach(function (c) {
+    var m = /^(api|klucz)=(.+)$/.exec(decodeURIComponent(c));
+    if (!m) return;
+    if (m[1] === 'api' && m[2]) { dane.API = m[2]; zLinku = true; }
+    if (m[1] === 'klucz' && m[2]) { dane.KLUCZ = m[2]; zLinku = true; }
+  });
+  if (zLinku) {
+    try { localStorage.setItem('konfig', JSON.stringify(dane)); } catch (ign) { }
+    history.replaceState(null, '', location.pathname); // czyścimy hash
+  }
+  return dane;
+})();
+
+function zapiszKonfiguracje(api, klucz) {
+  K.API = String(api || '').trim();
+  K.KLUCZ = String(klucz || '').trim();
+  try { localStorage.setItem('konfig', JSON.stringify(K)); } catch (ign) { }
+}
+
+/* ------------------------------------------------ warstwa API (fetch → /exec) */
+function wywolaj(akcja, dane, cb) {
+  var body = Object.assign({ akcja: akcja }, dane || {});
+  fetch(K.API, {
+    method: 'POST',
+    // text/plain = proste żądanie CORS (bez preflight OPTIONS,
+    // którego Apps Script nie obsługuje)
+    headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+    body: JSON.stringify(body)
+  }).then(function (odp) {
+    return odp.json();
+  }).then(function (wynik) {
+    cb(null, wynik);
+  }).catch(function (bladSieci) {
+    cb({ message: 'Brak połączenia z API: ' + (bladSieci && bladSieci.message || 'błąd sieci') +
+      (K.API ? '' : ' (adres API nie jest ustawiony — ⚙)') });
+  });
+}
+
+/* token Google (GIS) — doklejany do KAŻDEGO żądania wymagającego logowania */
+var TOKEN = '';
+
+/* ------------------------------------------------ stan aplikacji */
+var S = {
+  stan: null,            // odpowiedź dajStan
+  data: '',              // RRRR-MM-DD wybranej daty
+  grupa: '*',            // '*' = wszystkie
+  sortowanie: 'imie',    // 'imie' | 'nazwisko'
+  szukane: '',
+  trybCzlonkowie: false, // czy otwarty widok członków
+  tapy: {},              // { idZawodnika: {n: liczba tapów, t: timestamp} }
+  timery: {},            // timery resetu tapów per zawodnik
+  wisiace: {}            // { idZawodnika: 'zapis'|'usun'|'blad' }
+};
+
+/* ------------------------------------------------ pomocnicze */
+function lokalnaData(d) {
+  return d.getFullYear() + '-' + ('0' + (d.getMonth() + 1)).slice(-2) + '-' + ('0' + d.getDate()).slice(-2);
+}
+function polskieDni(dzien) {
+  return ['niedziela', 'poniedziałek', 'wtorek', 'środa', 'czwartek', 'piątek', 'sobota'][dzien];
+}
+function dlugaData(iso) {
+  var m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(iso);
+  if (!m) return iso;
+  var d = new Date(Number(m[1]), Number(m[2]) - 1, Number(m[3]));
+  return polskieDni(d.getDay()) + ', ' + Number(m[3]) + ' ' +
+    ['stycznia', 'lutego', 'marca', 'kwietnia', 'maja', 'czerwca', 'lipca',
+     'sierpnia', 'września', 'października', 'listopada', 'grudnia'][d.getMonth()] +
+    ' ' + m[1];
+}
+function esc(s) {
+  return String(s).replace(/[&<>"']/g, function (c) {
+    return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c];
+  });
+}
+
+/* ------------------------------------------------ render główny */
+function renderuj() {
+  var app = document.getElementById('app');
+
+  if (!S.stan) {
+    app.innerHTML = '<div class="ekran-pelny"><div class="spinner"></div><p>Ładowanie…</p></div>';
+    return;
+  }
+  if (S.stan.brakDostepu) {
+    if (S.stan.arkuszBrak) {
+      app.innerHTML =
+        '<div class="ekran-pelny">' +
+        '<h1>Problem z arkuszem</h1>' +
+        '<p>Aplikacja nie może teraz dosięgnąć arkusza Google klubu (błąd po stronie API).</p>' +
+        '<p><b>Co zrobić:</b> odśwież stronę za chwilę; jeśli problem trwa, zgłoś to właścicielowi (menu 📗 w arkuszu → „Pokaż wersję i stan").</p>' +
+        '<button class="btn-glowny" style="padding:12px 20px;border:none;border-radius:10px" onclick="location.reload()">Spróbuj ponownie</button>' +
+        '<p style="font-size:.8rem">' + WERSJA_UI + '</p>' +
+        '</div>';
+      return;
+    }
+    app.innerHTML =
+      '<div class="ekran-pelny">' +
+      '<h1>Brak dostępu</h1>' +
+      (S.stan.pustaLista
+        ? '<p>Biała lista jest jeszcze pusta. Właściciel musi dodać adresy e-mail w zakładce <b>Biala_lista</b> w arkuszu.</p>'
+        : '<p>Konto <b>' + esc(S.stan.email || '(nieznane)') + '</b> nie ma dostępu do dziennika.</p>' +
+          '<p>Poproś właściciela klubu o dodanie Twojego adresu do białej listy (zakładka <b>Biala_lista</b> w arkuszu) — potem odśwież tę stronę.</p>') +
+      '<button class="link-tryb" onclick="wyloguj()">Zaloguj się jako ktoś inny</button>' +
+      '<p style="font-size:.8rem">' + WERSJA_UI + '</p>' +
+      '</div>';
+    return;
+  }
+
+  if (S.trybCzlonkowie) { renderujCzlonkow(app); return; }
+
+  var lista = widoczni();
+  var obecnosciDzien = (S.stan.obecnosci[S.data] || []);
+  var ileObecnych = lista.filter(function (z) { return obecnosciDzien.indexOf(z.id) !== -1; }).length;
+
+  var html =
+    '<div class="topbar">' +
+      '<div class="rzad1">' +
+        '<span class="tytul">Obecność</span>' +
+        '<span class="licznik">' + ileObecnych + '/' + lista.length + ' obecnych</span>' +
+        '<button class="btn-ikona" id="btn-czlonkowie" title="Członkowie">👥 Członkowie</button>' +
+      '</div>' +
+      '<div class="rzad2">' +
+        '<span class="btn-data">📅 <input type="date" class="data-input" id="data" value="' + S.data + '" max="' + lokalnaData(new Date()) + '"></span>' +
+        '<input class="szukaj" id="szukaj" type="search" placeholder="Szukaj…" value="' + esc(S.szukane) + '">' +
+        '<div class="przelacznik">' +
+          '<button id="sort-imie" class="' + (S.sortowanie === 'imie' ? 'on' : '') + '">A→Z imię</button>' +
+          '<button id="sort-nazwisko" class="' + (S.sortowanie === 'nazwisko' ? 'on' : '') + '">A→Z nazwisko</button>' +
+        '</div>' +
+      '</div>' +
+    '</div>' +
+    '<div class="grupy">' +
+      przyciskGrupy('*', 'Wszystkie') +
+      S.stan.grupy.map(function (g) {
+        return przyciskGrupy(g.kod, g.nazwa || g.kod);
+      }).join('') +
+    '</div>' +
+    '<div class="lista">' +
+      lista.map(kafelHtml).join('') +
+      (lista.length === 0 ? '<p class="oplucie" style="text-align:center">Brak zawodników spełniających kryteria.</p>' : '') +
+    '</div>' +
+    '<div class="stopka">' +
+      '<p class="wersja">' + esc(S.stan.email) + ' · ' + WERSJA_UI + '</p>' +
+      '<div class="wiersz">' +
+        '<button class="on" id="stopka-obecnosc">📋 Obecność</button>' +
+        '<button id="stopka-czlonkowie">👥 Członkowie</button>' +
+      '</div>' +
+    '</div>';
+
+  app.innerHTML = html;
+  podpinz();
+}
+
+function przyciskGrupy(kod, etykieta) {
+  return '<button data-grupa="' + esc(kod) + '" class="' + (S.grupa === kod ? 'on' : '') + '">' + esc(etykieta) + '</button>';
+}
+
+function widoczni() {
+  var sortImie = S.sortowanie === 'imie';
+  var lista = S.stan.zawodnicy.filter(function (z) {
+    if (!z.aktywny) return false;
+    if (S.grupa !== '*' && z.grupa !== S.grupa) return false;
+    if (S.szukane) {
+      var sz = S.szukane.toLowerCase();
+      if ((z.imie + ' ' + z.nazwisko).toLowerCase().indexOf(sz) === -1) return false;
+    }
+    return true;
+  });
+  lista.sort(function (a, b) {
+    return sortImie
+      ? a.imie.localeCompare(b.imie, 'pl') || a.nazwisko.localeCompare(b.nazwisko, 'pl')
+      : a.nazwisko.localeCompare(b.nazwisko, 'pl') || a.imie.localeCompare(b.imie, 'pl');
+  });
+  return lista;
+}
+
+/* kafel zawodnika — stan wizualny zależny od tapów i synchronizacji */
+function kafelHtml(z) {
+  var dzien = S.stan.obecnosci[S.data] || [];
+  var obecny = dzien.indexOf(z.id) !== -1;
+  var tap = S.tapy[z.id];
+  var wisi = S.wisiace[z.id];
+  var klasy = 'kafel';
+  if (wisi === 'blad') klasy += ' blad';
+  else if (tap && tap.n >= 2) klasy += ' potwierdz';
+  else if (wisi) klasy += ' synchronizacja';
+  else if (obecny) klasy += ' obecny';
+
+  var status = '<span class="status">✓</span>';
+  if (wisi === 'zapis') status = '<span class="status">…</span>';
+  else if (wisi === 'usun') status = '<span class="status usun">…</span>';
+  else if (wisi === 'blad') status = '<span class="status">!</span>';
+  else if (tap && tap.n >= 2) status = '<span class="status usun">×' + tap.n + '</span>';
+  else if (obecny) status = '<span class="status">✓</span>';
+
+  return '<button class="' + klasy + '" data-id="' + esc(z.id) + '">' +
+    '<span class="wiersz-nazwy"><span class="nazwa"><b>' +
+    (S.sortowanie === 'nazwisko'
+      ? esc(z.nazwisko + ' ' + z.imie)
+      : esc(z.imie + ' ' + z.nazwisko)) +
+    '</b></span>' + status + '</span>' +
+    '<span class="grupa-etykieta">' + esc(z.grupa) + '</span>' +
+    '</button>';
+}
+
+/* tap w kafel: nieobecny → zapis; obecny → licznik do 3 → usunięcie */
+function tapZawodnika(z) {
+  var dzien = S.stan.obecnosci[S.data] || [];
+
+  if (dzien.indexOf(z.id) === -1) {
+    // nieobecny → zapis
+    dzien.push(z.id);
+    S.stan.obecnosci[S.data] = dzien;
+    S.wisiace[z.id] = 'zapis';
+    renderuj();
+    wywolaj('zapiszObecnosc', { token: TOKEN, id: z.id, data: S.data }, function (e, w) {
+      delete S.wisiace[z.id];
+      if (e || !w.ok) { obsluzBlad(e, w); return; }
+      renderuj();
+    });
+    return;
+  }
+
+  // obecny → licznik tapów do 3
+  var tap = S.tapy[z.id] || { n: 0, t: 0 };
+  tap.n += 1;
+  tap.t = Date.now();
+  S.tapy[z.id] = tap;
+  if (S.timery[z.id]) clearTimeout(S.timery[z.id]);
+  if (tap.n < 3) {
+    S.timery[z.id] = setTimeout(function () {
+      delete S.tapy[z.id];
+      delete S.timery[z.id];
+      renderuj();
+    }, 2000);
+    renderuj();
+    return;
+  }
+
+  // 3 tapy → usuń
+  delete S.tapy[z.id];
+  clearTimeout(S.timery[z.id]);
+  delete S.timery[z.id];
+  var idx = dzien.indexOf(z.id);
+  if (idx !== -1) dzien.splice(idx, 1);
+  S.stan.obecnosci[S.data] = dzien;
+  S.wisiace[z.id] = 'usun';
+  renderuj();
+  wywolaj('usunObecnosc', { token: TOKEN, id: z.id, data: S.data }, function (e, w) {
+    delete S.wisiace[z.id];
+    if (e || !w.ok) { obsluzBlad(e, w); return; }
+    renderuj();
+  });
+}
+
+/* wspólna obsługa błędów API (protokół z doPost v0.2.0) */
+function obsluzBlad(e, w) {
+  var blad = e ? e.message : (w && w.blad);
+  if (blad === 'ARKUSZ_BRAK') {
+    S.wisiace = {};
+    odswiezStan();
+    return;
+  }
+  if (blad === 'BRAK_DOSTEPU' || blad === 'BLAD_TOKENA') {
+    // sesja wygasła / token odrzucony / zdjęto z białej listy → logowanie
+    TOKEN = '';
+    S.stan = null;
+    start();
+    return;
+  }
+  // błąd akcji: oznacz kafel „Ponów" (jeden wspólny dymek na dole listy)
+  S.bladAkcji = (w && w.opis) || blad || 'Nieznany błąd';
+  renderuj();
+}
+
+/* ------------------------------------------------ widok: członkowie */
+function renderujCzlonkow(app) {
+  var sortImie = S.sortowanie !== 'nazwisko';
+  var wszyscy = S.stan.zawodnicy.slice().sort(function (a, b) {
+    return sortImie
+      ? a.imie.localeCompare(b.imie, 'pl') || a.nazwisko.localeCompare(b.nazwisko, 'pl')
+      : a.nazwisko.localeCompare(b.nazwisko, 'pl') || a.imie.localeCompare(b.imie, 'pl');
+  });
+  var aktywni = wszyscy.filter(function (z) { return z.aktywny; });
+  var nieaktywni = wszyscy.filter(function (z) { return !z.aktywny; });
+
+  app.innerHTML =
+    '<div class="topbar">' +
+      '<div class="rzad1">' +
+        '<span class="tytul">Członkowie (' + aktywni.length + ')</span>' +
+        '<button class="btn-ikona" id="btn-import" title="Wklej listę zawodników (Nazwisko Imię)">⬇ Import</button>' +
+        '<button class="btn-ikona" id="btn-dodaj">＋ Dodaj</button>' +
+      '</div>' +
+      '<div class="rzad2"><input class="szukaj" id="szukaj-czlonkowie" type="search" placeholder="Szukaj…" value="' + esc(S.szukane) + '"></div>' +
+    '</div>' +
+    '<div class="lista" style="display:block;max-width:720px">' +
+      wszyscy.filter(function (z) {
+        if (!S.szukane) return true;
+        var sz = S.szukane.toLowerCase();
+        return (z.imie + ' ' + z.nazwisko).toLowerCase().indexOf(sz) !== -1;
+      }).map(function (z) {
+        return '<div class="wiersz-czlonka' + (z.aktywny ? '' : ' nieaktywny') + '" data-id="' + esc(z.id) + '">' +
+          '<div class="dane"><b>' + (S.sortowanie === 'nazwisko'
+            ? esc(z.nazwisko + ' ' + z.imie)
+            : esc(z.imie + ' ' + z.nazwisko)) + '</b>' +
+          '<small>' + esc(z.grupa) + ' · dołączył: ' + esc(z.dolaczyl || '—') +
+            (z.ur ? ' · ur. ' + esc(z.ur) + ' (' + wiek(z.ur) + ' l.)' : '') +
+            (z.aktywny ? '' : ' · NIEAKTYWNY') + '</small></div>' +
+          '<div class="akcje">' +
+            '<button data-akcja="edytuj" data-id="' + esc(z.id) + '">✏️ Edytuj</button>' +
+            '<button data-akcja="przelacz" data-id="' + esc(z.id) + '">' + (z.aktywny ? '🚫 Deaktywuj' : '✔ Aktywuj') + '</button>' +
+          '</div></div>';
+      }).join('') +
+      (nieaktywni.length ? '<p class="oplucie">Osoby nieaktywne nie pojawiają się na liście obecności; ich historia zostaje.</p>' : '') +
+      (S.bladAkcji ? '<p class="oplucie" style="color:var(--blad)">Ostatnia operacja się nie powiodła: ' + esc(S.bladAkcji) + ' — spróbuj ponownie.</p>' : '') +
+    '</div>' +
+    '<div class="stopka">' +
+      '<p class="wersja">' + esc(S.stan.email) + ' · ' + WERSJA_UI + '</p>' +
+      '<div class="wiersz">' +
+        '<button id="stopka-obecnosc">📋 Obecność</button>' +
+        '<button class="on" id="stopka-czlonkowie">👥 Członkowie</button>' +
+      '</div>' +
+    '</div>';
+
+  podpinzCzlonkow();
+}
+
+/** Wiek z daty urodzenia RRRR-MM-DD (pełne lata; „?" gdy data bezsensowna). */
+function wiek(ur) {
+  var m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(ur || ''));
+  if (!m) return '?';
+  var d = new Date();
+  var w = d.getFullYear() - Number(m[1]);
+  var mies = d.getMonth() + 1 - Number(m[2]);
+  if (mies < 0 || (mies === 0 && d.getDate() < Number(m[3]))) w--;
+  return (w >= 0 && w < 130) ? String(w) : '?';
+}
+
+/** Import hurtowy: modal z polem na listę „Nazwisko Imię". */
+function modalImportu() {
+  var tlo = document.createElement('div');
+  tlo.className = 'tlo-modal';
+  tlo.innerHTML =
+    '<div class="modal">' +
+      '<h2>⬇ Import zawodników</h2>' +
+      '<p style="font-size:.85rem;color:var(--szary);margin:0 0 6px">Wklej listę — jedna osoba na wiersz:' +
+      ' <b>Nazwisko Imię</b>, opcjonalnie po przecinku grupa i data urodzenia (RRRR-MM-DD).' +
+      ' Osoby już będące w arkuszu są pomijane (bez dublowania).</p>' +
+      '<textarea id="f-import" rows="9" style="width:100%;border:1px solid var(--linia);border-radius:8px;padding:8px;font:inherit;font-size:.9rem" placeholder="Bochenek Bartosz&#10;Cygan Jakub, GR2&#10;Kotajny Karolina, GR1, 2008-04-12"></textarea>' +
+      '<div class="przyciski">' +
+        '<button class="btn-drugi" id="f-anuluj">Anuluj</button>' +
+        '<button class="btn-glowny" id="f-importuj">Importuj</button>' +
+      '</div>' +
+    '</div>';
+  document.body.appendChild(tlo);
+  tlo.querySelector('#f-anuluj').addEventListener('click', function () { tlo.remove(); });
+  tlo.querySelector('#f-importuj').addEventListener('click', function () {
+    var tekst = tlo.querySelector('#f-import').value;
+    if (!tekst.trim()) { alert('Wklej najpierw listę zawodników.'); return; }
+    var btn = tlo.querySelector('#f-importuj');
+    btn.disabled = true; btn.textContent = 'Importuję…';
+    wywolaj('importujUczestnikow', { token: TOKEN, tekst: tekst }, function (e, w) {
+      tlo.remove();
+      if (e) { alert('Błąd importu: ' + e.message); return; }
+      if (!w.ok) { obsluzBlad(null, w); return; }
+      var raport = 'Dodano: ' + w.dodano + ' · pominięto (już są): ' + w.pominieto;
+      if (w.bledy && w.bledy.length) {
+        raport += '\n\nWiersze z problemami (popraw i wklej ponownie tylko te):\n' + w.bledy.join('\n');
+      }
+      alert(raport);
+      odswiezStan();
+    });
+  });
+}
+
+function modalDodajEdytuj(z) {
+  var tlo = document.createElement('div');
+  tlo.className = 'tlo-modal';
+  var kody = S.stan.grupy.map(function (g) { return g.kod; });
+  var grupyOpcje = S.stan.grupy.slice();
+  if (z && z.grupa && kody.indexOf(z.grupa) === -1) {
+    grupyOpcje.push({ kod: z.grupa, nazwa: '' });
+  }
+  tlo.innerHTML =
+    '<div class="modal">' +
+      '<h2>' + (z ? 'Edytuj członka' : 'Dodaj członka') + '</h2>' +
+      '<label>Imię</label><input id="f-imie" value="' + esc(z ? z.imie : '') + '" autocomplete="off">' +
+      '<label>Nazwisko</label><input id="f-nazwisko" value="' + esc(z ? z.nazwisko : '') + '" autocomplete="off">' +
+      '<label>Data urodzenia (opcjonalnie)</label>' +
+      '<input id="f-ur" type="date" value="' + esc(z ? (z.ur || '') : '') + '" max="' + lokalnaData(new Date()) + '">' +
+      '<label>Grupa</label>' +
+      '<select id="f-grupa">' +
+        grupyOpcje.map(function (g) {
+          return '<option value="' + esc(g.kod) + '">' + esc(g.nazwa ? g.nazwa + ' (' + g.kod + ')' : g.kod) + '</option>';
+        }).join('') +
+        '<option value="__nowa">+ nowa grupa (wpisz niżej)…</option>' +
+      '</select>' +
+      '<label id="lbl-nowa" style="display:none">Nazwa nowej grupy (np. GR3)</label>' +
+      '<input id="f-nowa" style="display:none" placeholder="GR3" autocomplete="off">' +
+      '<div class="przyciski">' +
+        '<button class="btn-drugi" id="f-anuluj">Anuluj</button>' +
+        '<button class="btn-glowny" id="f-zapisz">' + (z ? 'Zapisz zmiany' : 'Dodaj') + '</button>' +
+      '</div>' +
+    '</div>';
+  document.body.appendChild(tlo);
+
+  var sel = tlo.querySelector('#f-grupa');
+  if (z) sel.value = z.grupa;
+  sel.addEventListener('change', function () {
+    var nowa = sel.value === '__nowa';
+    tlo.querySelector('#lbl-nowa').style.display = nowa ? 'block' : 'none';
+    tlo.querySelector('#f-nowa').style.display = nowa ? 'block' : 'none';
+  });
+  tlo.querySelector('#f-anuluj').addEventListener('click', function () { tlo.remove(); });
+  tlo.querySelector('#f-zapisz').addEventListener('click', function () {
+    var imie = tlo.querySelector('#f-imie').value.trim();
+    var nazwisko = tlo.querySelector('#f-nazwisko').value.trim();
+    var ur = tlo.querySelector('#f-ur').value;
+    var grupa = sel.value === '__nowa'
+      ? tlo.querySelector('#f-nowa').value.trim().toUpperCase().replace(/\s+/g, '')
+      : sel.value;
+    if (!imie || !nazwisko) { alert('Imię i nazwisko są wymagane.'); return; }
+    if (!grupa) grupa = 'GR1';
+
+    var zakoncz = function (e, w) {
+      tlo.remove();
+      if (e) { alert('Błąd zapisu: ' + e.message); return; }
+      if (!w.ok) { obsluzBlad(null, w); return; }
+      odswiezStan();
+    };
+    if (z) wywolaj('edytujCzlonka', { token: TOKEN, id: z.id, imie: imie, nazwisko: nazwisko, grupa: grupa, ur: ur }, zakoncz);
+    else wywolaj('dodajCzlonka', { token: TOKEN, imie: imie, nazwisko: nazwisko, grupa: grupa, ur: ur }, zakoncz);
+  });
+}
+
+/* ------------------------------------------------ odświeżanie */
+function odswiezStan(cb) {
+  wywolaj('dajStan', { token: TOKEN }, function (e, w) {
+    if (e) {
+      document.getElementById('app').innerHTML =
+        '<div class="ekran-pelny"><h1 class="blad-tekst">Błąd połączenia</h1>' +
+        '<p>' + esc(e.message) + '</p>' +
+        '<div class="przyciski" style="display:flex;gap:10px;margin-top:8px">' +
+        '<button class="btn-glowny" style="border:none;border-radius:10px;padding:12px 20px" onclick="location.reload()">Odśwież</button>' +
+        '<button class="btn-drugi" style="border-radius:10px;padding:12px 20px" onclick="pokazKonfiguracje()">⚙ Ustawienia</button></div></div>';
+      return;
+    }
+    if (w && w.blad === 'BLAD_TOKENA') { TOKEN = ''; start(); return; }
+    if (w && w.blad === 'ARKUSZ_BRAK') {
+      S.stan = { arkuszBrak: true, brakDostepu: true };
+      renderuj();
+      if (cb) cb();
+      return;
+    }
+    S.stan = w;
+    if (!S.data) S.data = w.dzisiaj || lokalnaData(new Date());
+    if (!S.sortowanie) S.sortowanie = (w.ustawienia && w.ustawienia.SORTOWANIE_DOMYSLNE) || 'imie';
+    var zapisane = null;
+    try { zapisane = localStorage.getItem('sortowanie'); } catch (ign) {}
+    if (zapisane === 'imie' || zapisane === 'nazwisko') S.sortowanie = zapisane;
+    if (cb) cb(); else renderuj();
+  });
+}
+
+/* ------------------------------------------------ podpinanie zdarzeń */
+function podpinz() {
+  var el = function (id) { return document.getElementById(id); };
+
+  if (el('data')) el('data').addEventListener('change', function () {
+    S.data = this.value || lokalnaData(new Date());
+    renderuj();
+  });
+  if (el('szukaj')) el('szukaj').addEventListener('input', function () {
+    S.szukane = this.value;
+    var kontener = document.querySelector('.lista');
+    var lista = widoczni();
+    kontener.innerHTML = lista.map(kafelHtml).join('') +
+      (S.bladAkcji ? dymekBledu() : '') ||
+      '<p class="oplucie" style="text-align:center">Brak zawodników spełniających kryteria.</p>';
+    podpinzKafelki();
+    aktualizujLicznik();
+  });
+  if (el('sort-imie')) el('sort-imie').addEventListener('click', function () {
+    ustawSortowanie('imie');
+  });
+  if (el('sort-nazwisko')) el('sort-nazwisko').addEventListener('click', function () {
+    ustawSortowanie('nazwisko');
+  });
+  if (el('btn-czlonkowie')) el('btn-czlonkowie').addEventListener('click', function () {
+    S.trybCzlonkowie = true; S.szukane = ''; renderuj();
+  });
+  if (el('stopka-obecnosc')) el('stopka-obecnosc').addEventListener('click', function () {
+    S.trybCzlonkowie = false; S.szukane = ''; renderuj();
+  });
+  if (el('stopka-czlonkowie')) el('stopka-czlonkowie').addEventListener('click', function () {
+    S.trybCzlonkowie = true; S.szukane = ''; renderuj();
+  });
+
+  document.querySelectorAll('.grupy button').forEach(function (b) {
+    b.addEventListener('click', function () {
+      S.grupa = this.getAttribute('data-grupa');
+      renderuj();
+    });
+  });
+
+  podpinzKafelki();
+}
+
+function dymekBledu() {
+  return '<div class="ponow"><span>Ostatnia operacja nie powiodła się: ' + esc(S.bladAkcji) +
+    '</span><button onclick="sprobujPonownie()">Ponów</button></div>';
+}
+
+function sprobujPonownie() {
+  S.bladAkcji = null;
+  renderuj();
+  odswiezStan();
+}
+
+function podpinzKafelki() {
+  document.querySelectorAll('.kafel').forEach(function (b) {
+    b.addEventListener('click', function () {
+      var id = this.getAttribute('data-id');
+      var z = null;
+      S.stan.zawodnicy.forEach(function (x) { if (x.id === id) z = x; });
+      if (z) tapZawodnika(z);
+    });
+  });
+}
+
+function ustawSortowanie(w) {
+  S.sortowanie = w;
+  try { localStorage.setItem('sortowanie', w); } catch (ign) {}
+  renderuj();
+}
+
+function aktualizujLicznik() {
+  var el = document.querySelector('.licznik');
+  if (!el) return;
+  var lista = widoczni();
+  var dzien = S.stan.obecnosci[S.data] || [];
+  var ile = lista.filter(function (z) { return dzien.indexOf(z.id) !== -1; }).length;
+  el.textContent = ile + '/' + lista.length + ' obecnych';
+}
+
+function podpinzCzlonkow() {
+  var sz = document.getElementById('szukaj-czlonkowie');
+  if (sz) sz.addEventListener('input', function () {
+    S.szukane = this.value;
+    var sortImie = S.sortowanie !== 'nazwisko';
+    var wszyscy = S.stan.zawodnicy.slice().sort(function (a, b) {
+      return sortImie
+        ? a.imie.localeCompare(b.imie, 'pl') || a.nazwisko.localeCompare(b.nazwisko, 'pl')
+        : a.nazwisko.localeCompare(b.nazwisko, 'pl') || a.imie.localeCompare(b.imie, 'pl');
+    });
+    var html = wszyscy.filter(function (z) {
+      if (!S.szukane) return true;
+      var s = S.szukane.toLowerCase();
+      return (z.imie + ' ' + z.nazwisko).toLowerCase().indexOf(s) !== -1;
+    }).map(function (z) {
+      return '<div class="wiersz-czlonka' + (z.aktywny ? '' : ' nieaktywny') + '" data-id="' + esc(z.id) + '">' +
+        '<div class="dane"><b>' + (S.sortowanie === 'nazwisko'
+          ? esc(z.nazwisko + ' ' + z.imie)
+          : esc(z.imie + ' ' + z.nazwisko)) + '</b>' +
+        '<small>' + esc(z.grupa) + ' · dołączył: ' + esc(z.dolaczyl || '—') + (z.aktywny ? '' : ' · NIEAKTYWNY') + '</small></div>' +
+        '<div class="akcje">' +
+          '<button data-akcja="edytuj" data-id="' + esc(z.id) + '">✏️ Edytuj</button>' +
+          '<button data-akcja="przelacz" data-id="' + esc(z.id) + '">' + (z.aktywny ? '🚫 Deaktywuj' : '✔ Aktywuj') + '</button>' +
+        '</div></div>';
+    }).join('');
+    var kontener = document.querySelector('.lista');
+    kontener.innerHTML = html + (wszyscy.some(function (z) { return !z.aktywny; })
+      ? '<p class="oplucie">Osoby nieaktywne nie pojawiają się na liście obecności; ich historia zostaje.</p>' : '');
+    podpinzAkcjeCzlonkow();
+  });
+
+  document.getElementById('btn-import').addEventListener('click', function () { modalImportu(); });
+  document.getElementById('btn-dodaj').addEventListener('click', function () { modalDodajEdytuj(null); });
+  document.getElementById('stopka-obecnosc').addEventListener('click', function () {
+    S.trybCzlonkowie = false; S.szukane = ''; renderuj();
+  });
+  podpinzAkcjeCzlonkow();
+}
+
+function podpinzAkcjeCzlonkow() {
+  document.querySelectorAll('button[data-akcja]').forEach(function (b) {
+    b.addEventListener('click', function () {
+      var id = this.getAttribute('data-id');
+      var akcja = this.getAttribute('data-akcja');
+      var z = null;
+      S.stan.zawodnicy.forEach(function (x) { if (x.id === id) z = x; });
+      if (!z) return;
+
+      if (akcja === 'edytuj') { modalDodajEdytuj(z); return; }
+
+      var nowyStan = !z.aktywny;
+      if (nowyStan === false &&
+          !confirm('Deaktywować ' + z.imie + ' ' + z.nazwisko + '?\nZniknie z listy obecności, historia zostanie zachowana.')) {
+        return;
+      }
+      wywolaj('przelaczAktywnosc', { token: TOKEN, id: z.id, aktywny: nowyStan }, function (e, w) {
+        if (e) { alert('Błąd: ' + e.message); return; }
+        if (!w.ok) { obsluzBlad(null, w); return; }
+        z.aktywny = nowyStan;
+        renderuj();
+      });
+    });
+  });
+}
+
+/* ------------------------------------------------ logowanie (Google Identity Services) */
+/** Zmiana konta: zrywamy token, wyłączamy auto-wybór konta GIS, przeładowanie.
+ * UWAGA: konfiguracja (API/klucz) zostaje — to ustawienia strony, nie sesji. */
+function wyloguj() {
+  TOKEN = '';
+  try {
+    if (typeof google !== 'undefined' && google.accounts && google.accounts.id) {
+      google.accounts.id.disableAutoSelect();
+    }
+  } catch (ign) { }
+  location.reload();
+}
+
+function pokazLogowanie(komunikat) {
+  var app = document.getElementById('app');
+  app.innerHTML =
+    '<div class="ekran-pelny logowanie">' +
+      '<div class="logo">🏓</div>' +
+      '<h1>Dziennik Obecności</h1>' +
+      '<p>KTS Gliwice — zapis obecności na treningach.<br>Zaloguj się kontem Google, na które właściciel klubu dał Ci dostęp.</p>' +
+      (komunikat ? '<p style="color:var(--blad);font-size:.9rem">' + esc(komunikat) + '</p>' : '') +
+      '<div class="przycisk-w-srodku" id="przycisk-google"></div>' +
+      '<button class="link-tryb" onclick="pokazKonfiguracje()">⚙ Ustawienia strony (dla właściciela)</button>' +
+      '<p style="font-size:.75rem;color:var(--szary)">' + WERSJA_UI + '</p>' +
+    '</div>';
+  zainicjujGoogle();
+}
+
+function zainicjujGoogle() {
+  if (!K.KLUCZ) return; // bez Client ID nie ma czym się logować (ustawienia ⚙)
+  // GIS ładuje się asynchronicznie — czekamy aż google.accounts stanie się dostępne
+  var proby = 0;
+  (function czekaj() {
+    if (typeof google !== 'undefined' && google.accounts && google.accounts.id) {
+      google.accounts.id.initialize({
+        client_id: K.KLUCZ,
+        callback: function (odp) { poZalogowaniu(odp.credential); }
+      });
+      google.accounts.id.renderButton(
+        document.getElementById('przycisk-google'),
+        { theme: 'outline', size: 'large', text: 'signin_with', locale: 'pl' }
+      );
+      return;
+    }
+    if (++proby < 40) setTimeout(czekaj, 250); // 10 s na załadowanie GIS
+  })();
+}
+
+function poZalogowaniu(token) {
+  TOKEN = token;
+  document.getElementById('app').innerHTML =
+    '<div class="ekran-pelny"><div class="spinner"></div><p>Sprawdzam dostęp…</p></div>';
+  odswiezStan();
+}
+
+/* ------------------------------------------------ ⚙: ustawienia (API + Client ID) */
+function pokazKonfiguracje() {
+  var tlo = document.createElement('div');
+  tlo.className = 'tlo-modal';
+  tlo.innerHTML =
+    '<div class="modal">' +
+      '<h2>⚙ Ustawienia strony</h2>' +
+      '<p style="font-size:.85rem;color:var(--szary);margin:0 0 4px">Strona (GitHub Pages) rozmawia z arkuszem Google przez API Apps Script.' +
+      ' Wypełnia właściciel klubu — trenerzy dostają gotowy link i nic tu nie zmieniają.</p>' +
+      '<label>Adres API (URL wdrożenia — kończy się na /exec)</label>' +
+      '<input id="f-api" placeholder="https://script.google.com/macros/s/…/exec" value="' + esc(K.API) + '" autocomplete="off" spellcheck="false">' +
+      '<label>Client ID OAuth (Google Cloud Console)</label>' +
+      '<input id="f-klucz" placeholder="1234567890-abc…apps.googleusercontent.com" value="' + esc(K.KLUCZ) + '" autocomplete="off" spellcheck="false">' +
+      '<div class="przyciski">' +
+        '<button class="btn-drugi" id="f-anuluj">Anuluj</button>' +
+        '<button class="btn-glowny" id="f-zapisz">Zapisz i sprawdź</button>' +
+      '</div>' +
+      '<p id="f-status" style="font-size:.85rem;color:var(--szary);margin:10px 0 0"></p>' +
+      '<p style="font-size:.78rem;color:var(--szary);margin:12px 0 0">Link dla trenerów (skopiuj i wyślij):<br>' +
+      '<span id="f-link" style="word-break:break-all"></span></p>' +
+    '</div>';
+  document.body.appendChild(tlo);
+  var odswiezLink = function () {
+    var baza = location.origin + location.pathname;
+    tlo.querySelector('#f-link').textContent =
+      baza + '#api=' + encodeURIComponent(tlo.querySelector('#f-api').value.trim()) +
+      '&klucz=' + encodeURIComponent(tlo.querySelector('#f-klucz').value.trim());
+  };
+  odswiezLink();
+  tlo.querySelector('#f-api').addEventListener('input', odswiezLink);
+  tlo.querySelector('#f-klucz').addEventListener('input', odswiezLink);
+  tlo.querySelector('#f-anuluj').addEventListener('click', function () { tlo.remove(); });
+  tlo.querySelector('#f-zapisz').addEventListener('click', function () {
+    var status = tlo.querySelector('#f-status');
+    status.textContent = 'Sprawdzam połączenie z API…';
+    zapiszKonfiguracje(tlo.querySelector('#f-api').value, tlo.querySelector('#f-klucz').value);
+    // health-check: ping nie wymaga logowania
+    wywolaj('ping', {}, function (e, w) {
+      if (e) {
+        status.style.color = 'var(--blad)';
+        status.textContent = '✗ ' + e.message;
+        return;
+      }
+      if (!w.ok) {
+        status.style.color = 'var(--blad)';
+        status.textContent = '✗ API odpowiedziało, ale nieprawidłowo: ' + JSON.stringify(w);
+        return;
+      }
+      status.style.color = 'var(--akcent)';
+      status.textContent = '✓ Połączenie OK — API wersja ' + w.api + '. Zapisano. Zamykam…';
+      setTimeout(function () { tlo.remove(); start(); }, 1200);
+    });
+  });
+}
+
+/* ------------------------------------------------ start */
+function start() {
+  if (!K.API) {
+    // brak konfiguracji: strona świeża (albo trener bez linku) → ⚙
+    pokazKonfiguracje();
+    return;
+  }
+  if (TOKEN) { odswiezStan(); return; }
+  // health-check przed logowaniem (zły URL → od razu ⚙, nie po zalogowaniu)
+  wywolaj('ping', {}, function (e, w) {
+    if (e || !w.ok) {
+      pokazLogowanie('Nie mogę dosięgnąć API (' + (e ? 'sieć' : 'odpowiedź') + ') — sprawdź adres w ⚙.');
+      return;
+    }
+    pokazLogowanie();
+  });
+}
+
+(function startAuto() { start(); })();
