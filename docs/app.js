@@ -15,7 +15,7 @@
 
 'use strict';
 
-var WERSJA_UI = 'v0.2.2';
+var WERSJA_UI = 'v0.2.3';
 
 /* ------------------------------------------------ konfiguracja (config.js + localStorage + #hash) */
 var K = (function () {
@@ -55,6 +55,12 @@ function zapiszKonfiguracje(api, klucz) {
 
 /* ------------------------------------------------ warstwa API (fetch → /exec) */
 function wywolaj(akcja, dane, cb) {
+  if (!K.API) {
+    // strona jeszcze niepodłączona do arkusza — nie strzelamy fetchem
+    // w samą siebie (r17: stąd brał się „JSON.parse: unexpected character")
+    cb({ message: 'Strona nie ma jeszcze połączenia z arkuszem — właściciel kończy podłączenie (brakuje adresu API).' });
+    return;
+  }
   var body = Object.assign({ akcja: akcja }, dane || {});
   fetch(K.API, {
     method: 'POST',
@@ -63,12 +69,19 @@ function wywolaj(akcja, dane, cb) {
     headers: { 'Content-Type': 'text/plain;charset=utf-8' },
     body: JSON.stringify(body)
   }).then(function (odp) {
-    return odp.json();
-  }).then(function (wynik) {
+    // Apps Script odpowiada JSON-em; zły adres potrafi zwrócić stronę
+    // HTML (np. 404) — wtedy czytelny komunikat, nie „JSON.parse:…"
+    return odp.text();
+  }).then(function (tekst) {
+    var wynik;
+    try { wynik = JSON.parse(tekst); }
+    catch (nieJson) {
+      cb({ message: 'Pod tym adresem nie ma naszego API — sprawdź, czy adres kończy się na /exec (Wdróż → Zarządzaj wdrożeniami → 🌐).' });
+      return;
+    }
     cb(null, wynik);
   }).catch(function (bladSieci) {
-    cb({ message: 'Brak połączenia z API: ' + (bladSieci && bladSieci.message || 'błąd sieci') +
-      (K.API ? '' : ' (adres API nie jest ustawiony)') });
+    cb({ message: 'Brak połączenia z arkuszem (serwer nie odpowiada). Sprawdź internet i odśwież stronę; jeśli trwa to dłużej — zgłoś właścicielowi.' });
   });
 }
 
@@ -667,13 +680,24 @@ function wyloguj() {
 
 function pokazLogowanie(komunikat) {
   var app = document.getElementById('app');
+  // co brakuje do pełnego działania (r17: ekran logowania ma być PIERWSZY
+  // i ALWAYS — informacja o brakach to żółta kartka, nie karta ustawień)
+  var braki = [];
+  if (!K.API) braki.push('adres API (wdrożenie Apps Script)');
+  if (!K.KLUCZ) braki.push('Client ID (logowanie Google)');
   app.innerHTML =
     '<div class="ekran-pelny logowanie">' +
       '<div class="logo">🏓</div>' +
       '<h1>Dziennik Obecności</h1>' +
       '<p>KTS Gliwice — zapis obecności na treningach.<br>Zaloguj się kontem Google, na które właściciel klubu dał Ci dostęp.</p>' +
       (komunikat ? '<p style="color:var(--blad);font-size:.9rem">' + esc(komunikat) + '</p>' : '') +
+      (braki.length
+        ? '<div style="background:#fff7e0;border:1px solid #e6c96a;border-radius:10px;padding:10px 14px;margin:6px 0 2px;max-width:420px;font-size:.85rem;color:#6b5b1e;text-align:left">' +
+            '⏳ Strona czeka na dokończenie podłączenia do arkusza przez właściciela (brakuje: ' + esc(braki.join(' i ')) + ').' +
+            ' Gdy je uzupełni, przycisk poniżej od razu zadziała.</div>'
+        : '') +
       '<div class="przycisk-w-srodku" id="przycisk-google"></div>' +
+      '<p id="google-info" style="font-size:.85rem;color:var(--szary);max-width:420px;margin:4px 0"></p>' +
       '<p style="font-size:.75rem;color:var(--szary)">' + WERSJA_UI + '</p>' +
       '<button class="link-tryb" onclick="pokazKonfiguracje()" style="font-size:.72rem">Ustawienia strony (dla właściciela)</button>' +
     '</div>';
@@ -682,11 +706,24 @@ function pokazLogowanie(komunikat) {
 
 function zainicjujGoogle() {
   if (!K.KLUCZ) {
-    // bez Client ID przycisk Google się nie pojawi — jasny komunikat zamiast pustki
-    var info = document.querySelector('#przycisk-google');
-    if (info) info.innerHTML =
-      '<p style="color:var(--blad);font-size:.9rem">Przycisk logowania nie może się pokazać:' +
-      ' brak Client ID strony. Zgłoś to właścicielowi (to ustawienie strony, nie Twoje).</p>';
+    // bez Client ID Google nie obsłuży logowania (wymóg Google, nie nasz) —
+    // pokazujemy przycisk w stanie „jeszcze nieaktywny" i uczciwie mówimy,
+    // co się stanie po kliknięciu; NIE ukrywamy całego ekranu logowania
+    var pojemnik = document.getElementById('przycisk-google');
+    if (!pojemnik) return;
+    pojemnik.innerHTML =
+      '<button id="btn-google-off" style="display:inline-flex;align-items:center;gap:10px;' +
+        'background:#fff;border:1px solid #dadce0;border-radius:8px;min-height:44px;padding:0 18px;' +
+        'font-size:.95rem;color:#3c4043;cursor:pointer;box-shadow:0 1px 2px rgba(60,64,67,.2)">' +
+        '<svg width="20" height="20" viewBox="0 0 48 48" aria-hidden="true"><path fill="#EA4335" d="M24 9.5c3.5 0 6.6 1.2 9 3.5l6.7-6.7C35.6 2.5 30.2 0 24 0 14.6 0 6.5 5.4 2.6 13.2l7.8 6.1C12.3 13.3 17.7 9.5 24 9.5z"/><path fill="#4285F4" d="M46.5 24.5c0-1.6-.1-3.1-.4-4.5H24v9h12.7c-.6 3-2.3 5.5-4.8 7.2l7.6 5.9c4.4-4.1 7-10.1 7-17.6z"/><path fill="#FBBC05" d="M10.4 28.7c-.5-1.5-.8-3-.8-4.7s.3-3.2.8-4.7l-7.8-6.1C.9 16.1 0 19.9 0 24s.9 7.9 2.6 11.3l7.8-6.6z"/><path fill="#34A853" d="M24 48c6.2 0 11.5-2 15.5-5.6l-7.6-5.9c-2.1 1.4-4.8 2.3-7.9 2.3-6.3 0-11.7-3.8-13.6-9.1l-7.8 6.6C6.5 42.6 14.6 48 24 48z"/></svg>' +
+        'Zaloguj się z Google' +
+      '</button>';
+    pojemnik.querySelector('#btn-google-off').addEventListener('click', function () {
+      var info = document.getElementById('google-info');
+      if (info) info.textContent =
+        'Logowanie Google zacznie działać, gdy właściciel uzupełni brakujące ustawienia strony.' +
+        ' Jeśli to Ty — wejdź w „Ustawienia strony” na dole.';
+    });
     return;
   }
   // GIS ładuje się asynchronicznie — czekamy aż google.accounts stanie się dostępne
@@ -748,8 +785,23 @@ function pokazKonfiguracje() {
   tlo.querySelector('#f-anuluj').addEventListener('click', function () { tlo.remove(); });
   tlo.querySelector('#f-zapisz').addEventListener('click', function () {
     var status = tlo.querySelector('#f-status');
+    var api = tlo.querySelector('#f-api').value.trim();
+    var klucz = tlo.querySelector('#f-klucz').value.trim();
+    status.style.color = 'var(--blad)';
+    // walidacja PRZED zapisem (r17: wklejony „`” kończył się JSON.parse…)
+    if (!/^https:\/\/.+\/exec$/.test(api)) {
+      status.textContent = '✗ Adres API powinien zaczynać się od https:// i kończyć na /exec. ' +
+        'Skopiuj CAŁY adres z Apps Script: Wdróż → Zarządzaj wdrożeniami → ikona 🌐.';
+      return;
+    }
+    if (!/^[\w.-]+\.apps\.googleusercontent\.com$/.test(klucz)) {
+      status.textContent = '✗ Client ID to ciąg kończący się na .apps.googleusercontent.com — ' +
+        'skopiuj go z Google Cloud Console (APIs & Services → Credentials).';
+      return;
+    }
+    status.style.color = 'var(--szary)';
     status.textContent = 'Sprawdzam połączenie z API…';
-    zapiszKonfiguracje(tlo.querySelector('#f-api').value, tlo.querySelector('#f-klucz').value);
+    zapiszKonfiguracje(api, klucz);
     // health-check: ping nie wymaga logowania
     wywolaj('ping', {}, function (e, w) {
       if (e) {
@@ -757,36 +809,26 @@ function pokazKonfiguracje() {
         status.textContent = '✗ ' + e.message;
         return;
       }
-      if (!w.ok) {
+      if (!w || !w.ok) {
         status.style.color = 'var(--blad)';
-        status.textContent = '✗ API odpowiedziało, ale nieprawidłowo: ' + JSON.stringify(w);
+        status.textContent = '✗ Pod tym adresem nie odpowiada nasze API. Sprawdź, czy wkleiłeś adres ' +
+          'wdrożenia (kończy się na /exec) i czy wdrożenie jest opublikowane.';
         return;
       }
       status.style.color = 'var(--akcent)';
-      status.textContent = '✓ Połączenie OK — API wersja ' + w.api + '. Zapisano. Zamykam…';
-      setTimeout(function () { tlo.remove(); start(); }, 1200);
+      status.textContent = '✓ Połączenie działa (API ' + w.api + '). Odświeżam stronę…';
+      setTimeout(function () { location.reload(); }, 1000);
     });
   });
 }
 
 /* ------------------------------------------------ start */
 function start() {
-  if (!K.API) {
-    // strona świeża — w config.js nie ma jeszcze adresu API. Pokazujemy
-    // kartę informacyjną dla właściciela (trenerzy zobaczą ją tylko,
-    // gdy właściciel jeszcze nie dokończył podłączenia strony do arkusza).
-    pokazKonfiguracje();
-    return;
-  }
+  // r17 (ekran logowania ma być PIERWSZY, zawsze): konfiguracja strony
+  // nie blokuje wejścia — braki pokazuje żółta kartka na ekranie
+  // logowania, kartę ustawień otwiera właściciel linkiem na dole.
   if (TOKEN) { odswiezStan(); return; }
-  // health-check przed logowaniem (zły URL → od razu komunikat, nie po zalogowaniu)
-  wywolaj('ping', {}, function (e, w) {
-    if (e || !w.ok) {
-      pokazLogowanie('Chwilowy problem z połączeniem — odśwież stronę za chwilę.');
-      return;
-    }
-    pokazLogowanie();
-  });
+  pokazLogowanie();
 }
 
 (function startAuto() { start(); })();
