@@ -1,30 +1,34 @@
 # Dziennik Obecności — KTS Gliwice
 
-**Strona trenerów** (frontend) aplikacji „Dziennik Obecności" klubu tenisa
-stołowego KTS Gliwice — zapis obecności na treningach jednym tapnięciem.
+To repozytorium to **hosting plików strony** aplikacji „Dziennik
+Obecności" klubu tenisa stołowego KTS Gliwice (zapis obecności na
+treningach jednym tapnięciem).
 
 ## Jak to działa
 
-- **Ta strona (GitHub Pages)** — interfejs: logowanie kontem Google,
-  kafelki zawodników, tap = obecność. To jest ten adres, który znają
+- **Aplikacja** żyje pod adresem wdrożenia Google Apps Script (kończy
+  się na `/exec`) — tam Google sam pokazuje okienko logowania kontem
+  Google, a po zalogowaniu działa cała apka. To ten adres otwierają
   trenerzy.
-- **API (Google Apps Script)** — pośrednik: przyjmuje żądania strony,
-  sprawdza tożsamość (token Google) i białą listę, zapisuje dane w arkuszu.
-- **Arkusz Google (Drive)** — baza danych klubu: uczestnicy, obecności,
-  archiwum, log. Dostęp do niego mają tylko uprawnione konta.
+- **To repo (GitHub Pages)** trzyma pliki interfejsu: `docs/index.html`,
+  `docs/style.css`, `docs/app.js`. Apps Script pobiera je przy każdym
+  otwarciu i serwuje jako stronę aplikacji — dzięki temu **zmiana
+  wyglądu = push do tego repo**, bez ruszania Apps Script.
+- **Arkusz Google (Drive)** to baza danych klubu: uczestnicy,
+  obecności, archiwum, log. Dostęp = udostępnienie arkusza (Edytor)
+  + biała lista (zakładka `Biala_lista`).
 
-Dostęp ma wyłącznie osoba, która: (1) zaloguje się kontem Google i
-(2) jest na białej liście w arkuszu (dodaje właściciel). Bez tego strona
-pokazuje tylko ekran logowania/odmowy — żadnych danych klubu tu nie ma.
+Otwarcie strony bezpośrednio na GitHub Pages pokazuje ekran
+„To nie jest aplikacja" — to zamierzone (tu nie ma sesji Google ani
+danych; apka działa tylko pod `/exec`).
 
 ## Techniczne
 
-- Pliki: `docs/index.html` + `docs/config.js` (adres API i Client ID
-  OAuth) + `docs/app.js` (logika; bez zależności, bez buildera).
 - Hosting: GitHub Pages (branch `main`, folder `/docs`).
+- Bez zależności, bez buildera — czysty HTML/CSS/JS.
 - Responsywna: telefon 375 px → desktop.
-- Aktualizacja UI: podmiana plików w `docs/` (repo prywatne trzyma
-  źródło i testy; publiczne dostaje gotową stronę).
+- Repo prywatne (projekt) trzyma źródło, testy i backend Apps Script;
+  to repo dostaje gotową stronę.
 
 ---
 Właściciel projektu: KTS Gliwice. Backend: Google Apps Script + Arkusze Google.
