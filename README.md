@@ -1,31 +1,21 @@
-# Dziennik Obecności KTS Gliwice — PODGLĄD (demo)
+# Dziennik Obecności — KTS Gliwice (strona informacyjna)
 
-Publiczna strona **podglądowa** aplikacji „Dziennik Obecności" dla klubu
-tenisa stołowego KTS Gliwice. Pokazuje interfejs z **danymi przykładowymi**
-(TRYB DEMO) — bez logowania, bez połączenia z arkuszem Google, bez danych
-rzeczywistych zawodników.
+Publiczna **wizytówka** aplikacji „Dziennik Obecności" dla klubu tenisa
+stołowego KTS Gliwice. Od rundy 14 (2026-11-22) strona publiczna NIE jest
+podglądem interfejsu z danymi przykładowymi — koniec z mockupami (decyzja
+właściciela). Znajdziesz tu opis możliwości aplikacji i zasady dostępu.
 
-## Co tu jest, a czego nie ma
-
-| | tu (podgląd) | aplikacja właściwa |
-|---|---|---|
-| Dane | przykładowe (~12 osób) | prawdziwe (~35 zawodników) |
-| Zapisywanie obecności | nie (tylko na ekranie) | tak — do arkusza Google |
-| Logowanie | nie | konto Google + biała lista |
-| Kod backendu | nie | repo **prywatne** |
-
-## Dlaczego osobne repo
-
-Kod źródłowy i dane klubu zostają w **repozytorium prywatnym** (decyzja
-właściciela). To repo zawiera wyłącznie statyczną stronę podglądową UI —
-żadnych danych osobowych, żadnych kluczy.
+- Aplikacja właściwa: **Web App Google Apps Script** (adres `/exec`,
+  udostępniany przez właściciela klubu trenerom wraz z dostępem).
+- Kod źródłowy: **repozytorium prywatne** (decyzja właściciela).
+- Dane zawodników: **arkusz Google klubu**, dostęp tylko dla uprawnionych
+  kont (udostępnienie pliku + biała lista); każda obecność podpisana
+  kontem trenera.
 
 ## Techniczne
 
-- Jeden plik: `docs/index.html` (HTML + CSS + JS, bez zależności, bez buildera).
+- Jeden plik: `docs/index.html` (HTML + CSS, bez zależności, bez buildera).
 - Hosting: GitHub Pages (branch `main`, folder `/docs`).
 - Responsywna: telefon 375 px → tablet → desktop.
-- Aktualizacja podglądu = podmiana `docs/index.html` przy nowej wersji UI.
-
----
-Kontakt: właściciel klubu KTS Gliwice. Aplikacja: Google Apps Script + Arkusze Google.
+- Aktualizacja: `python3 scripts/build_public_page.py` (w środowisku
+  roboczym) → przegląd diffu → commit + push; Pages przebuduje się sam.
