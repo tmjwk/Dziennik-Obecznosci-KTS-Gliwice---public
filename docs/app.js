@@ -71,11 +71,38 @@
  *    ostatnie 300 wpisów zamiast 5000. Razem ~0,3–0,7 s szybsze
  *    potwierdzenie „✓" (reszta to infrastruktura Google — nie do
  *    ruszenia bez opuszczenia Apps Scriptu, świadomie odkładamy).
+ *
+ * r31 („frontend czasem sam się wylogowuje w trakcie wprowadzania
+ * zmian — i zmiany nie docierają"): token GIS żyje ~1 h i wygasa
+ * w POŁOWIE drainowania kolejki. Do v0.2.9 odpowiedź BLAD_TOKENA
+ * czysciła kolejkę i wylogowywała (S.kolejka=[] + ekran logowania)
+ * — nieodesłane kliknięcia przepadały bez śladu. Naprawa:
+ * 1) BLAD_TOKENA z kolejki NIE wylogowuje: wpis „w locie" wraca na
+ *    czoło kolejki (backend waliduje token PRZED wykonaniem akcji,
+ *    więc operacja na pewno się NIE wykonała — a zapisy są
+ *    idempotentne, ponowienie jest zawsze bezpieczne), wysyłka
+ *    dostaje pauzę, a nad listą (kafelki z kropkami zostają widoczne
+ *    pod spodem) pojawia się nakładka „Sesja wygasła" z przyciskiem
+ *    Google. Ponowne zalogowanie (One Tap = często jeden klik)
+ *    zdejmuje pauzę i kolejka sama się drenuje.
+ * 2) KOLEJKA PAMIĘTANA: intencje {id, akcja, data} trzymamy w
+ *    localStorage (jak sesję) — F5 czy zamknięcie karty w trakcie
+ *    wysyłki NIE gubi kliknięć; po powrocie i zalogowaniu kolejka
+ *    wraca (optymizm naniesiony na świeży stan) i leci do arkusza.
+ *    Świadome „Wyloguj" czyści kolejkę (inna osoba na urządzeniu
+ *    nie drenuje cudzych intencji).
+ * 3) DATA W WPIŚIE: każdy wpis kolejki pamięta datę tapnięcia —
+ *    zmiana daty w trakcie drainowania nie wysyła już obecności
+ *    pod złą datą (dotąd brano S.data z chwili wysyłki).
+ * 4) ARKUSZ_BRAK z kolejki: pauza zamiast czyszczenia (akcja też
+ *    nie zdążyła się wykonać); gdy arkusz wróci, dajStan sukcesem
+ *    drenuje kolejkę. BRAK_DOSTEPU (zdjęcie z białej listy) nadal
+ *    czyści — konto bez dostępu nie może mutować arkusza.
  * ================================================================= */
 
 'use strict';
 
-var WERSJA_UI = 'v0.2.9';
+var WERSJA_UI = 'v0.3.0';
 
 /* r25: najstarsza wersja API (Apps Script), z jaką ta strona umie
  * współpracować. v0.2.4 = akcje grup (dodajGrupe/edytujGrupe/usunGrupe);
@@ -109,6 +136,21 @@ function banerWersji() {
     'Dodawanie i edycja grup nie zadziała, dopóki właściciel nie wgra nowego kodu: ' +
     'script.google.com → projekt Dziennika → zaznacz cały kod (Ctrl+A) → wklej nowy → zapisz (Ctrl+S) → ' +
     'Wdróż → Zarządzaj wdrożeniami → ✎ → Nowa wersja → Wdróż. Po ok. minucie odśwież stronę.' +
+    '</div>';
+}
+
+/* r31: baner pauzy wysyłki — widoczny, gdy kolejka czeka na ponowne
+ * logowanie (BLAD_TOKENA) albo powrót arkusza (ARKUSZ_BRAK), a nakładka
+ * została ukryta („Później — pokaż listę"). Kliknięciom podczas pauzy
+ * NIE ginie: dokładają się do kolejki (drenują po powrocie sesji). */
+function banerPauzy() {
+  if (!S.pauza || !S.kolejka.length) return '';
+  return '<div class="baner-wersji" id="baner-pauzy" style="border-color:#e6c96a;background:#fff7e0;color:#6b5b1e">' +
+    (S.pauza === 'sesja'
+      ? '<b>Sesja wygasła</b> — ' + S.kolejka.length + ' zmian czeka w kolejce. ' +
+        'Zaloguj się ponownie, a lista dokończy wysyłkę do arkusza. '
+      : '<b>Arkusz chwilowo niedostępny</b> — ' + S.kolejka.length + ' zmian czeka w kolejce. ') +
+    '<button class="btn-glowny" id="baner-pauzy-zaloguj" style="padding:8px 14px;border:none;border-radius:8px;font-size:.85rem">Zaloguj ponownie</button>' +
     '</div>';
 }
 
@@ -247,9 +289,15 @@ var S = {
    * kafel „w locie" kolejkuje wpis NASTĘPNY po nim. Błąd pojedynczej
    * operacji = revert tylko tego kafla + dymek „Ponów", kolejka leci
    * dalej. „wisiace" jest odtąd WYLICZANE z kolejki+wLocie (pomocnicze
-   * pole zsynchronizowane przy każdej zmianie — patrz zsynchronizujWisiace). */
-  , kolejka: []          // NIEWYSŁANE intencje: {id, akcja}
+   * pole zsynchronizowane przy każdej zmianie — patrz zsynchronizujWisiace).
+   * r31: wpis {id, akcja, data} — data tapnięcia jawnie w wpisie
+   * (zmiana daty mid-drain nie wysyła pod złą datę); kolejka żyje
+   * w localStorage (przetrwa F5/zamknięcie karty), a pauza=true
+   * wstrzymuje wysyłkę do ponownego zalogowania (BLAD_TOKENA) albo
+   * powrotu arkusza (ARKUSZ_BRAK). */
+  , kolejka: []          // NIEWYSŁANE intencje: {id, akcja, data}
   , wLocie: null         // wpis wysłany właśnie do serwera (lub null)
+  , pauza: null          // 'sesja' | 'arkusz' | null — wstrzymana wysyłka
 };
 
 /* ------------------------------------------------ sesja (r28)
@@ -271,6 +319,70 @@ function wyczyscSesje() {
 }
 function odczytajSesje() {
   try { return localStorage.getItem(KLUCZ_SESJI) || ''; } catch (ign) { return ''; }
+}
+
+/* r31: kolejka obecności w localStorage — F5/zamknięcie karty w trakcie
+ * wysyłki NIE gubi nieodesłanych kliknięć. Zapisujemy tylko wewnętrzne
+ * intencje (id zawodnika, akcja, data) + e-mail właściciela kolejki —
+ * po powrocie DRENUJEMY TYLKO WŁASNE intencje (na wspólnym urządzeniu
+ * ktoś inny zalogowany NIE wysyła cudzych obecności). „Wyloguj" czyści
+ * (osoba przejmująca urządzenie nie dziedziczy intencji). Format:
+ * {email, wpisy:[{id, akcja, data}]}. */
+var KLUCZ_KOLEJKI = 'dziennik_kolejka';
+
+/* r31: czy kolejka została już wczytana z localStorage przy tym stanie
+ * strony (wczytujemy RAZ, przy pierwszym udanym dajStan — potem S.kolejka
+ * jest żywa i sami ją utrzymujemy w zapisie). */
+var KOLEJKA_WCZYTANA = false;
+
+function zapiszKolejke() {
+  try {
+    localStorage.setItem(KLUCZ_KOLEJKI, JSON.stringify({
+      email: (S.stan && S.stan.email) || '',
+      wpisy: S.kolejka
+    }));
+  } catch (ign) { /* brak localStorage = kolejka tylko w pamięci */ }
+}
+
+/** Odtwarza kolejkę z localStorage RAZ, po pierwszym udanym dajStan
+ * (wcześniej nie ma stanu, na którym można pracować). Tylko WŁASNE
+ * wpisy (e-mail z zapisu musi pasować do zalogowanego) — na wspólnym
+ * urządzeniu cudze intencje są porzucane, nie drenowane. Skandaliczne
+ * wpisy (dziwny JSON, brak pól) są pomijane. */
+function odczytajKolejke() {
+  var dane = null;
+  try { dane = JSON.parse(localStorage.getItem(KLUCZ_KOLEJKI) || 'null'); } catch (ign) { return; }
+  if (!dane || !Array.isArray(dane.wpisy)) return;
+  var moja = !dane.email || !S.stan || !S.stan.email || dane.email === S.stan.email;
+  var czysta = [];
+  if (moja) {
+    dane.wpisy.forEach(function (w) {
+      if (!w || typeof w.id !== 'string' || !w.id) return;
+      if (w.akcja !== 'zapiszObecnosc' && w.akcja !== 'usunObecnosc') return;
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(String(w.data || ''))) return;
+      czysta.push({ id: w.id, akcja: w.akcja, data: String(w.data) });
+    });
+  }
+  if (czysta.length) S.kolejka = czysta;
+  else {
+    // cudza kolejka albo zmurszały zapis — czyścimy, żeby nie wisiał
+    try { localStorage.removeItem(KLUCZ_KOLEJKI); } catch (ign) {}
+  }
+}
+
+/** Nanosi optymizm kolejki na AKTUALNY stan (idempotentne zbiory id):
+ * kafelki czekających intencji pokazują docelowe znaczenie od razu,
+ * choć serwer ich jeszcze nie potwierdził. Wywoływane po KAŻDYM
+ * podstawieniu S.stan (dajStan, przyjmijStan) — inaczej świeży stan
+ * „cofnąłby" wizualnie czekające kliknięcia. */
+function przywrocOptymizmKolejki() {
+  if (!S.stan || !S.stan.obecnosci || !S.kolejka.length) return;
+  S.kolejka.forEach(function (w) {
+    var dzien = S.stan.obecnosci[w.data] || (S.stan.obecnosci[w.data] = []);
+    var i = dzien.indexOf(w.id);
+    if (w.akcja === 'zapiszObecnosc' && i === -1) dzien.push(w.id);
+    if (w.akcja === 'usunObecnosc' && i !== -1) dzien.splice(i, 1);
+  });
 }
 
 /* ------------------------------------------------ pomocnicze */
@@ -380,6 +492,7 @@ function renderuj() {
         : '<button data-grupa="__nowa" class="grupa-nowa" title="Dodaj grupę">＋</button>') +
     '</div>' +
     banerWersji() +
+    banerPauzy() +
     '<div class="lista">' +
       lista.map(kafelHtml).join('') +
       (S.bladAkcji ? dymekBledu() : '') +
@@ -587,15 +700,19 @@ function tapZawodnika(z) {
  * zaraz trzeba cofać usunięciem). Jeśli wpis tej osoby jest już W LOCIE,
  * nowy wpis trafia na koniec kolejki jako osobna operacja (tego, co leci
  * do serwera, nie da się wycofać — zostanie rozliczone per-zawodnik
- * wg odpowiedzi). */
+ * wg odpowiedzi). r31: wpis wie, pod jaką datą tapnięto (S.data z chwili
+ * tapnięcia), a zmiana jest od razu w localStorage. */
 function zakolejkuj(id, akcja) {
   for (var i = 0; i < S.kolejka.length; i++) {
     if (S.kolejka[i].id === id) {
       S.kolejka[i].akcja = akcja;
+      S.kolejka[i].data = S.data;
+      zapiszKolejke();
       return;
     }
   }
-  S.kolejka.push({ id: id, akcja: akcja });
+  S.kolejka.push({ id: id, akcja: akcja, data: S.data });
+  zapiszKolejke();
 }
 
 /* Utrzymuje S.wisiace zgodne z kolejką+wLocie (kafelHtml czyta to pole).
@@ -609,25 +726,68 @@ function zsynchronizujWisiace() {
       S.wisiace[wpis.id] = wpis.akcja === 'usunObecnosc' ? 'usun' : 'zapis';
     }
   });
+  // r31: wisi nakładka „Sesja wygasła"? odświeżamy licznik oczekujących
+  // (user może doklikiwać kolejne osoby podczas pauzy — niech widzi, że rośnie)
+  var nakladka = document.getElementById('nakladka-wygasla');
+  if (nakladka) odswiezLicznikNakladki(nakladka);
 }
 
 /* Pętla wysyłania: jedna operacja w locie, reszta czeka. Wywoływana po
- * każdej zmianie kolejki i po rozliczeniu odpowiedzi. */
+ * każdej zmianie kolejki i po rozliczeniu odpowiedzi. r31: pauza
+ * (S.pauza = 'sesja' po BLAD_TOKENA, 'arkusz' po ARKUSZ_BRAK) wstrzymuje
+ * PĘTLĘ WYSYŁKI, ale nie obsługę UI — tapnięcia podczas pauzy dokładają
+ * się do kolejki (kropki + licznik nakładki żyją przez zsynchronizujWisiace
+ * z zakolejkuj/tapZawodnika). */
 function wysylaKolejke() {
+  if (S.pauza) {
+    // pauza: tapnięcie doszło do kolejki — pokaż kropkę „w kolejce"
+    // (renderuj w tapZawodnika zdarzył się PRZED zsynchronizujWisiace,
+    // więc tu domykamy rysunek) i czekaj na logowanie / powrót arkusza
+    zsynchronizujWisiace();
+    if (S.stan && S.stan.obecnosci) renderuj();
+    return;
+  }
   if (S.wLocie || !S.kolejka.length) return;
   var wpis = S.kolejka.shift();
   S.wLocie = wpis;
   zsynchronizujWisiace();
-  var dataWyslania = S.data; // data znana w chwili tapnięcia-wysyłki
+  var dataWyslania = wpis.data || S.data; // r31: data z CHWILI TAPNIĘCIA
   wywolaj(wpis.akcja, { token: TOKEN, id: wpis.id, data: dataWyslania }, function (e, w) {
     S.wLocie = null;
 
-    // błąd sesji/arkusza = koniec świata dla całej kolejki: logowanie
-    // albo ekran problemu z arkuszem. Nie rozliczamy per-zawodnik, bo
-    // nie wiemy, co serwer zdążył zapisać → pełny dajStan porządkuje.
+    // r31: sesja wygasła W TRAKCIE kolejki → NIE wylogowujemy i NIE
+    // czyścimy. Backend waliduje token PRZED wykonaniem akcji, więc ta
+    // operacja na pewno się nie wykonała; wraca na czoło kolejki
+    // (kolejność tapnięć), wysyłka dostaje pauzę, nad listą pojawia się
+    // nakładka „Sesja wygasła" z przyciskiem Google. Po ponownym
+    // zalogowaniu kolejka sama się drenuje (zapisy idempotentne —
+    // nawet gdyby wpis „w locie" dotarł, duplikatu nie będzie).
     var blad = e ? '_polaczenie' : (w && w.blad);
-    if (blad === 'ARKUSZ_BRAK' || blad === 'BRAK_DOSTEPU' || blad === 'BLAD_TOKENA') {
+    if (blad === 'BLAD_TOKENA') {
+      S.kolejka.unshift(wpis);
+      zapiszKolejke();
+      zsynchronizujWisiace();
+      wyczyscSesje();
+      S.pauza = 'sesja';
+      renderuj(); // kropki „czeka w kolejce" na liście POD nakładką
+      pokazNakladkeWygaslaSesje();
+      return;
+    }
+    if (blad === 'ARKUSZ_BRAK') {
+      // r31: arkusz chwilowo niedostępny → pauza (akcja się nie wykonała);
+      // gdy arkusz wróci, dajStan sukcesem zdejmie pauzę i drenuje kolejkę.
+      S.kolejka.unshift(wpis);
+      zapiszKolejke();
+      zsynchronizujWisiace();
+      S.pauza = 'arkusz';
+      obsluzBlad(e, w);
+      return;
+    }
+    if (blad === 'BRAK_DOSTEPU') {
+      // zdjęto z białej listy — konto nie może mutować arkusza; intencje
+      // nie mają prawa lecieć dalej (każde żądanie = odmowa w kółko)
       S.kolejka = [];
+      zapiszKolejke();
       zsynchronizujWisiace();
       obsluzBlad(e, w);
       return;
@@ -635,9 +795,13 @@ function wysylaKolejke() {
 
     // błąd POŁĄCZENIA (sieć padła): nie wiemy, czy serwer zapisał.
     // Revert optymistycznego znaczenia tego kafla (serwer wygrywa),
-    // dymek „Ponów", kolejka leci dalej.
+    // dymek „Ponów", kolejka leci dalej. r31: wpis jest rozliczony
+    // (revert widoczny dla usera) → LS musi się zgodzić z pamięcią;
+    // jedyny świadomy „zaleg" w LS to wpis W LOCIE (patrz shift wyżej
+    // — bez zapisu po zdjęciu z kolejki: F5 w locie = ponowienie).
     if (e) {
       cofnijOptymizm(wpis, dataWyslania);
+      zapiszKolejke();
       S.bladAkcji = e.message;
       zsynchronizujWisiace();
       renderuj();
@@ -648,6 +812,7 @@ function wysylaKolejke() {
     if (!w.ok) {
       // błąd biznesowy tej operacji: revert kafla + dymek; reszta leci.
       cofnijOptymizm(wpis, dataWyslania);
+      zapiszKolejke(); // r31: jw. — rozliczony wpis znika i z LS
       S.bladAkcji = (w && w.opis) || w.blad || 'Nieznany błąd';
       zsynchronizujWisiace();
       renderuj();
@@ -661,9 +826,12 @@ function wysylaKolejke() {
     // serwer jeszcze nie zna (odpowiedź NIE może cofnąć ich optymistycznych
     // znaczeń) — rozliczamy je po ich własnej intencji. Ktoś inny mógł
     // zapisać się w międzyczasie — jego wpis z odpowiedzi zostaje.
+    // r31: intencje w kolejce mogą dotyczyć INNEJ daty niż ta, która
+    // właśnie wróciła (zmiana daty mid-drain) — merge per data wpisu.
     if (w && w.stan && w.stan.obecnosci && w.stan.obecnosci[dataWyslania] && !w.stan.brakDostepu) {
       var nowy = w.stan.obecnosci[dataWyslania].slice();
       S.kolejka.forEach(function (wp) {
+        if (wp.data !== dataWyslania) return; // tylko intencje tego dnia
         var i = nowy.indexOf(wp.id);
         if (wp.akcja === 'zapiszObecnosc' && i === -1) nowy.push(wp.id);
         if (wp.akcja === 'usunObecnosc' && i !== -1) nowy.splice(i, 1);
@@ -674,6 +842,7 @@ function wysylaKolejke() {
       // znaczenie optymistyczne — potwierdzi je najbliższy dajStan;
       // spójność pełna wróci przy F5/odświeżeniu.
     }
+    zapiszKolejke(); // r31: kolejka się skróciła — trzymamy localStorage w zgodzie
     zsynchronizujWisiace();
     renderuj();
     wysylaKolejke(); // następna operacja z kolejki
@@ -693,23 +862,118 @@ function cofnijOptymizm(wpis, data) {
   if (S.timery[wpis.id]) { clearTimeout(S.timery[wpis.id]); delete S.timery[wpis.id]; }
 }
 
+/* r31: nakładka „Sesja wygasła" — NIE przełączamy ekranu (lista z kropkami
+ * „w trakcie" zostaje pod spodem, user widzi co jeszcze nie doleciało),
+ * tylko dokładamy warstwę z przyciskiem Google i liczbą oczekujących.
+ * renderuj() przerysowuje #app — dlatego nakładka żyje w body i jest
+ * przerysowywana przez zsynchronizujWisiace→renderuj NIE ruszana; tu
+ * tylko odświeżamy licznik wpisów w istniejącej nakładce. */
+function pokazNakladkeWygaslaSesje() {
+  var stara = document.getElementById('nakladka-wygasla');
+  if (stara) { odswiezLicznikNakladki(stara); return; }
+  var tlo = document.createElement('div');
+  tlo.className = 'tlo-modal';
+  tlo.id = 'nakladka-wygasla';
+  tlo.innerHTML =
+    '<div class="modal" style="text-align:center">' +
+      '<h2>Sesja wygasła</h2>' +
+      '<p style="font-size:.9rem;color:var(--szary)">Sesja Google kończy się po około godzinie — to nie błąd, tylko zabezpieczenie.</p>' +
+      '<p style="font-size:.9rem">Twoje kliknięcia (<b id="nakladka-ile">0</b>) czekają w kolejce i nic nie przepadło — zaloguj się ponownie, a lista dokończy wysyłkę do arkusza.</p>' +
+      '<div class="przycisk-w-srodku" id="nakladka-google"></div>' +
+      '<p style="font-size:.78rem;color:var(--szary)">Chcesz zostawić to na później? Nic nie zginie — kolejka przetrwa zamknięcie strony i dokończy się po powrocie.</p>' +
+      '<button class="link-tryb" id="nakladka-pokaz-liste" style="font-size:.8rem;margin-top:2px">Później — chcę jeszcze poprawiać listę</button>' +
+      '<button class="link-tryb" id="nakladka-porzuc" style="font-size:.78rem;margin-top:6px">Wyloguj się i porzuć oczekujące zmiany</button>' +
+    '</div>';
+  document.body.appendChild(tlo);
+  odswiezLicznikNakladki(tlo);
+  tlo.querySelector('#nakladka-pokaz-liste').addEventListener('click', function () {
+    tlo.remove(); // baner pauzy (renderuj) przejmuje wskazanie drogi powrotu
+    renderuj();   // rysuje listę + baner pauzy (pauza ustawiona, kolejka wisi)
+  });
+  tlo.querySelector('#nakladka-porzuc').addEventListener('click', function () {
+    if (!confirm('Porzucić ' + S.kolejka.length + ' oczekujących zmian i wylogować się?\n' +
+        'Kliknięcia, które nie dotarły jeszcze do arkusza, przepadną.')) return;
+    wyloguj(); // czyści token, kolejkę i przeładowuje stronę
+  });
+  zainicjujGoogleWNakladce(tlo);
+}
+
+function odswiezLicznikNakladki(tlo) {
+  var el = tlo.querySelector('#nakladka-ile');
+  if (el) el.textContent = String(S.kolejka.length);
+}
+
+/* GIS w nakładce: initialize BYŁ już zrobiony (zainicjujGoogle przy
+ * starcie ekranu logowania) — ponowne initialize z tym samym client_id
+ * jest dozwolone i podmienia callback. Renderujemy przycisk w nakładce
+ * i wsuwamy One Tap (klient z zapamiętanym kontem = jeden klik). */
+function zainicjujGoogleWNakladce(tlo) {
+  var pojemnik = tlo.querySelector('#nakladka-google');
+  if (!pojemnik) return;
+  if (!K.KLUCZ) {
+    pojemnik.innerHTML = '<p style="font-size:.85rem;color:var(--blad)">Brak Client ID — odśwież stronę i zaloguj się zwykłym przyciskiem.</p>';
+    return;
+  }
+  var proby = 0;
+  (function czekaj() {
+    if (typeof google !== 'undefined' && google.accounts && google.accounts.id) {
+      google.accounts.id.initialize({
+        client_id: K.KLUCZ,
+        callback: function (odp) { poPonownymZalogowaniu(odp.credential); }
+      });
+      google.accounts.id.renderButton(
+        pojemnik,
+        { theme: 'outline', size: 'large', text: 'signin_with', locale: 'pl' }
+      );
+      try { google.accounts.id.prompt(function (n) {}); } catch (ign) { }
+      return;
+    }
+    if (++proby < 40) setTimeout(czekaj, 250); // 10 s na GIS
+  })();
+}
+
+/* r31: koniec pauzy po ponownym zalogowaniu — nowy token, nakładka
+ * znika, ale pauzę 'sesja' zdejmie dopiero udany dajStan (gdyby nowy
+ * token też był odrzucony, odswiezStan na BLAD_TOKENA przywróci
+ * nakładkę — intencje wciąż na miejscu). Przy sukcesie odswiezStan
+ * sam zdejmie pauzę i ruszy pętlę — kolejka się drenuje. */
+function poPonownymZalogowaniu(token) {
+  TOKEN = token;
+  zapiszSesje(token);
+  var nakladka = document.getElementById('nakladka-wygasla');
+  if (nakladka) nakladka.remove();
+  odswiezStan();
+}
+
 /* wspólna obsługa błędów API (protokół z doPost v0.2.0) */
 function obsluzBlad(e, w) {
   var blad = e ? e.message : (w && w.blad);
   if (blad === 'ARKUSZ_BRAK') {
-    // r30: wraz z wisiącymi czyścimy kolejkę (wywołania z kolejki
-    // czyszczą ją PRZED obsluzBlad; tu zabezpieczenie dla innych ścieżek)
-    S.kolejka = [];
-    S.wisiace = {};
+    // r31: NIE czyścimy kolejki — akcja się nie wykonała, intencje
+    // czekają (pauza 'arkusz' z kolejki albo najbliższe dajStan);
+    // odswiezStan pokaże ekran problemu, a gdy arkusz wróci (S.próbuj
+    // ponownie / F5), sukces zdejmie pauzę i drenuje
+    zsynchronizujWisiace();
     odswiezStan();
     return;
   }
   if (blad === 'BRAK_DOSTEPU' || blad === 'BLAD_TOKENA') {
-    // sesja wygasła / token odrzucony / zdjęto z białej listy → logowanie
-    // r28: czyścimy zapamiętaną sesję (inaczej start() „wracałby" martwym
-    // tokenem w pętli); disableAutoSelect — żeby One Tap nie wskrzeszał
-    // konta zaraz po wygaśnięciu
-    wyczyscSesje();
+    // r31: gdy wisi kolejka (pauza 'sesja' albo intencje w pamięci),
+    // BLAD_TOKENA NIE wylogowuje — nakładka „Sesja wygasła" z przyciskiem
+    // Google; po ponownym zalogowaniu dajStan potwierdza token i kolejka
+    // sama się drenuje. Dotyczy też akcji z modali (grupy/członkowie)
+    // padłych na wygasłym tokenie. Bez kolejki — po staremu: sprzątamy
+    // zapamiętaną sesję (żeby F5 nie kręciło w kółko „Wracam do
+    // dziennika…") i wracamy do logowania.
+    if (blad === 'BLAD_TOKENA' && (S.pauza === 'sesja' || S.kolejka.length || S.wLocie)) {
+      wyczyscSesje();
+      S.pauza = 'sesja';
+      zsynchronizujWisiace();
+      renderuj();
+      pokazNakladkeWygaslaSesje();
+      return;
+    }
+    if (blad === 'BLAD_TOKENA') wyczyscSesje();
     TOKEN = '';
     S.stan = null;
     start();
@@ -765,6 +1029,7 @@ function renderujCzlonkow(app) {
     '</div>' +
     '<div class="lista" style="display:block;max-width:720px">' +
       banerWersji() +
+      banerPauzy() +
       wszyscy.filter(function (z) {
         if (!S.szukane) return true;
         var sz = S.szukane.toLowerCase();
@@ -958,6 +1223,10 @@ function przyjmijStan(w, modyfikator, potwierdz) {
   // fast-path: serwer v0.2.6+ sam przysłał stan mutacji
   if (w && w.stan && !w.stan.brakDostepu) {
     S.stan = w.stan;
+    // r31: mutacja (np. dodajGrupe) przynosi stan, który NIE zna jeszcze
+    // intencji obecności czekających w kolejce — przywracamy optymizm,
+    // żeby czekające kafelki nie „mrugały" na zielono-czerwono
+    przywrocOptymizmKolejki();
     if (!S.data) S.data = w.stan.dzisiaj || lokalnaData(new Date());
     renderuj();
     return;
@@ -989,8 +1258,15 @@ function odswiezStan(cb, proby, potwierdz) {
       return;
     }
     if (w && w.blad === 'BLAD_TOKENA') {
-      // r28: wygasła sesja — sprzątamy zapamiętany token (żeby F5 nie
-      // kręciło w kółko „Wracam do dziennika…") i wracamy do logowania
+      // r31: gdy wisi kolejka (pauza 'sesja'), ZOSTAJEMY przy nakładce —
+      // intencje czekają na ponowne zalogowanie, nie przerysowujemy
+      // ekranu logowaniem. Odświeżamy tylko nakładkę (licznik). Bez
+      // kolejki — po staremu: sprzątamy zapamiętany token (żeby F5 nie
+      // kręciło w kółko „Wracam do dziennika…") → logowanie.
+      if (S.pauza === 'sesja') {
+        pokazNakladkeWygaslaSesje();
+        return;
+      }
       wyczyscSesje();
       TOKEN = '';
       start();
@@ -1021,12 +1297,24 @@ function odswiezStan(cb, proby, potwierdz) {
       }
     }
     S.stan = w;
+    // r31: pierwszy udany stan = moment na kolejkę z localStorage (F5
+    // w trakcie wysyłki). Udany dajStan dowodzi, że token ŻYJE i arkusz
+    // ODPOWIADA — więc obie pauzy ('sesja' i 'arkusz') schodzą, a optymizm
+    // kolejki wraca NA ŚWIEŻYM stanie (bez tego dajStan „cofnąłby"
+    // czekające kafelki). I rusza pętla wysyłki.
+    if (!KOLEJKA_WCZYTANA) {
+      odczytajKolejke();
+      KOLEJKA_WCZYTANA = true;
+    }
+    S.pauza = null;
+    przywrocOptymizmKolejki();
     if (!S.data) S.data = w.dzisiaj || lokalnaData(new Date());
     if (!S.sortowanie) S.sortowanie = (w.ustawienia && w.ustawienia.SORTOWANIE_DOMYSLNE) || 'imie';
     var zapisane = null;
     try { zapisane = localStorage.getItem('sortowanie'); } catch (ign) {}
     if (zapisane === 'imie' || zapisane === 'nazwisko') S.sortowanie = zapisane;
     if (cb) cb(); else renderuj();
+    wysylaKolejke(); // r31: kolejka czeka? pętla rusza (pauza zdjęta/jej nie było)
   });
 }
 
@@ -1095,6 +1383,10 @@ function podpinz() {
     ustawSortowanie(S.sortowanie === 'nazwisko' ? 'imie' : 'nazwisko');
   });
   if (el('stopka-wyloguj')) el('stopka-wyloguj').addEventListener('click', function () { wyloguj(); });
+  // r31: baner pauzy — powrót nakładki „Sesja wygasła" bez utraty kolejki
+  if (el('baner-pauzy-zaloguj')) el('baner-pauzy-zaloguj').addEventListener('click', function () {
+    pokazNakladkeWygaslaSesje();
+  });
   if (el('stopka-obecnosc')) el('stopka-obecnosc').addEventListener('click', function () {
     S.trybCzlonkowie = false; S.szukane = ''; renderuj();
   });
@@ -1242,11 +1534,14 @@ function podpinzAkcjeCzlonkow() {
 }
 
 /* ------------------------------------------------ logowanie (Google Identity Services) */
-/** Zmiana konta: zrywamy token, wyłączamy auto-wybór konta GIS, przeładowanie.
+/** Zmiana konta / świadome zakończenie sesji: zrywamy token, wyłączamy
+ * auto-wybór konta GIS, porzucamy czekającą kolejkę (r31: inna osoba
+ * na urządzeniu nie może drenować cudzych intencji), przeładowanie.
  * UWAGA: konfiguracja (API/klucz) zostaje — to ustawienia strony, nie sesji. */
 function wyloguj() {
   TOKEN = '';
   wyczyscSesje(); // r28: „zaloguj jako ktoś inny" NIE może wrócić starym tokenem
+  try { localStorage.removeItem(KLUCZ_KOLEJKI); } catch (ign) {} // r31: porzucamy intencje
   WYLOGOWANY_WLASNIE = true; // r28: bez One Tap zaraz po świadomym wylogowaniu
   try {
     if (typeof google !== 'undefined' && google.accounts && google.accounts.id) {
