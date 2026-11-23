@@ -1,5 +1,5 @@
 /* =================================================================
- * Dziennik Obecności KTS Gliwice — frontend v0.2.8
+ * Dziennik Obecności KTS Gliwice — frontend v0.2.9
  * Przepływ (instrukcja właściciela, runda 17):
  *   1) użytkownik wchodzi na https://tmjwk.github.io/Dziennik-Obecznosci-
  *      KTS-Gliwice---public/ (strona hostowana na GitHub Pages),
@@ -50,11 +50,32 @@
  * sortowanie (przełącznik A→Z imię/nazwisko). „👥 Członkowie" ZNIKA z
  * topbara — przejmuje je stały pasek na dole ekranu (istniejący od r6),
  * pod listą, zawsze pod kciukiem. Desktop BEZ zmian (r27).
+ *
+ * r30 („po kliknięciu przycisku uczestnika długo czekam na „Obecny""):
+ * DWIE zmiany, ustalone z właścicielem:
+ * 1) KOLEJKA FIFO obecności (całość ustaleń B z rundy 30): mutacje
+ *    obecności lecą PO JEDNEJ (jedna w locie), w kolejności tapnięć.
+ *    Koniec z równoległymi żądaniami, które serwer i tak serializuje
+ *    LockService'm (10 s waitLock potrafił wybuchnąć przy serii
+ *    szybkich tapnięć), a odpowiedzi mogły wrócić w złej kolejności
+ *    i nadpisać stan starszą odpowiedzią. Koalescing per zawodnik:
+ *    tapnięcie w trakcie oczekiwania nadpisuje intencję (zapis→usun
+ *    = jedno żądanie „usun" zamiast dwóch). Błąd pojedynczej operacji
+ *    = revert TYLKO tego kafla + dymek „Ponów"; kolejka leci dalej.
+ *    Rozliczenie per-zawodnik z w.stan odpowiedzi (obecności dnia),
+ *    nie całym stanem — odpowiedź wcześniejszego tapnięcia nie cofa
+ *    optymistycznych znaczeń pozostałych kafli.
+ * 2) Backend v0.2.7 (ustalenia A1+A4 z rundy 30): cache tokena GIS
+ *    (5 min, SHA-256 klucz, tylko sukcesy) pomija UrlFetchApp do
+ *    Google przy każdym żądaniu; skan idempotentności zapisu czyta
+ *    ostatnie 300 wpisów zamiast 5000. Razem ~0,3–0,7 s szybsze
+ *    potwierdzenie „✓" (reszta to infrastruktura Google — nie do
+ *    ruszenia bez opuszczenia Apps Scriptu, świadomie odkładamy).
  * ================================================================= */
 
 'use strict';
 
-var WERSJA_UI = 'v0.2.8';
+var WERSJA_UI = 'v0.2.9';
 
 /* r25: najstarsza wersja API (Apps Script), z jaką ta strona umie
  * współpracować. v0.2.4 = akcje grup (dodajGrupe/edytujGrupe/usunGrupe);
@@ -215,7 +236,20 @@ var S = {
   trybCzlonkowie: false, // czy otwarty widok członków
   tapy: {},              // { idZawodnika: {n: liczba tapów, t: timestamp} }
   timery: {},            // timery resetu tapów per zawodnik
-  wisiace: {}            // { idZawodnika: 'zapis'|'usun'|'blad' }
+  wisiace: {}            // { idZawodnika: 'zapis'|'usun'|'blad' } — wyliczane
+  /* r30: kolejka FIFO obecności (ustalenie B z rundy 30). Intencje lecą
+   * do serwera PO JEDNEJ (jedna w locie), w kolejności tapnięć — koniec
+   * z równoległymi żądaniami, które serwer i tak serializuje LockService'm
+   * (waitLock(10 s) potrafił wybuchnąć przy serii szybkich tapnięć),
+   * a odpowiedzi wracały w złej kolejności i nadpisywały stan starszą
+   * odpowiedzią. Koalescing per zawodnik: tapnięcie tej samej osoby
+   * nadpisuje jej NIEWYSŁANY wpis (ostatnia intencja wygrywa), tap w
+   * kafel „w locie" kolejkuje wpis NASTĘPNY po nim. Błąd pojedynczej
+   * operacji = revert tylko tego kafla + dymek „Ponów", kolejka leci
+   * dalej. „wisiace" jest odtąd WYLICZANE z kolejki+wLocie (pomocnicze
+   * pole zsynchronizowane przy każdej zmianie — patrz zsynchronizujWisiace). */
+  , kolejka: []          // NIEWYSŁANE intencje: {id, akcja}
+  , wLocie: null         // wpis wysłany właśnie do serwera (lub null)
 };
 
 /* ------------------------------------------------ sesja (r28)
@@ -348,6 +382,7 @@ function renderuj() {
     banerWersji() +
     '<div class="lista">' +
       lista.map(kafelHtml).join('') +
+      (S.bladAkcji ? dymekBledu() : '') +
       (lista.length === 0 ? '<p class="oplucie" style="text-align:center">Brak zawodników spełniających kryteria.</p>' : '') +
     '</div>' +
     '<div class="stopka">' +
@@ -498,7 +533,12 @@ function kafelHtml(z) {
     '</button>';
 }
 
-/* tap w kafel: nieobecny → zapis; obecny → licznik do 3 → usunięcie */
+/* tap w kafel: nieobecny → zapis; obecny → licznik do 3 → usunięcie.
+ * r30: intencje NIE strzelają do serwera od razu — trafiają do kolejki
+ * FIFO (wysylaKolejke poniżej). Kafel i tak jest optymistyczny (stan
+ * lokalny zmienia się natychmiast), pełne „✓" przychodzi po potwierdzeniu
+ * serwera — dokładnie jak ustaliliśmy: pewność dotarcia kliknięcia
+ * do arkusza, tylko bez wyścigów równoległych żądań. */
 function tapZawodnika(z) {
   var dzien = S.stan.obecnosci[S.data] || [];
 
@@ -506,13 +546,9 @@ function tapZawodnika(z) {
     // nieobecny → zapis
     dzien.push(z.id);
     S.stan.obecnosci[S.data] = dzien;
-    S.wisiace[z.id] = 'zapis';
+    zakolejkuj(z.id, 'zapiszObecnosc');
     renderuj();
-    wywolaj('zapiszObecnosc', { token: TOKEN, id: z.id, data: S.data }, function (e, w) {
-      delete S.wisiace[z.id];
-      if (e || !w.ok) { obsluzBlad(e, w); return; }
-      renderuj();
-    });
+    wysylaKolejke();
     return;
   }
 
@@ -539,19 +575,131 @@ function tapZawodnika(z) {
   var idx = dzien.indexOf(z.id);
   if (idx !== -1) dzien.splice(idx, 1);
   S.stan.obecnosci[S.data] = dzien;
-  S.wisiace[z.id] = 'usun';
+  zakolejkuj(z.id, 'usunObecnosc');
   renderuj();
-  wywolaj('usunObecnosc', { token: TOKEN, id: z.id, data: S.data }, function (e, w) {
-    delete S.wisiace[z.id];
-    if (e || !w.ok) { obsluzBlad(e, w); return; }
-    renderuj();
+  wysylaKolejke();
+}
+
+/* ------------------------------------------------ r30: kolejka FIFO obecności */
+
+/* Koalescing per zawodnik: nowa intencja tej samej osoby ZASTĘPUJE jej
+ * niewysłany wpis (ostatnia intencja wygrywa — po co wysyłać zapis, który
+ * zaraz trzeba cofać usunięciem). Jeśli wpis tej osoby jest już W LOCIE,
+ * nowy wpis trafia na koniec kolejki jako osobna operacja (tego, co leci
+ * do serwera, nie da się wycofać — zostanie rozliczone per-zawodnik
+ * wg odpowiedzi). */
+function zakolejkuj(id, akcja) {
+  for (var i = 0; i < S.kolejka.length; i++) {
+    if (S.kolejka[i].id === id) {
+      S.kolejka[i].akcja = akcja;
+      return;
+    }
+  }
+  S.kolejka.push({ id: id, akcja: akcja });
+}
+
+/* Utrzymuje S.wisiace zgodne z kolejką+wLocie (kafelHtml czyta to pole).
+ * Kafel „w locie" ma własny status (kropki), wpisy czekające — też
+ * (renderuj i tak przerysowuje po każdej rozliczonej operacji). */
+function zsynchronizujWisiace() {
+  S.wisiace = {};
+  if (S.wLocie) S.wisiace[S.wLocie.id] = S.wLocie.akcja === 'usunObecnosc' ? 'usun' : 'zapis';
+  S.kolejka.forEach(function (wpis) {
+    if (!S.wisiace[wpis.id]) {
+      S.wisiace[wpis.id] = wpis.akcja === 'usunObecnosc' ? 'usun' : 'zapis';
+    }
   });
+}
+
+/* Pętla wysyłania: jedna operacja w locie, reszta czeka. Wywoływana po
+ * każdej zmianie kolejki i po rozliczeniu odpowiedzi. */
+function wysylaKolejke() {
+  if (S.wLocie || !S.kolejka.length) return;
+  var wpis = S.kolejka.shift();
+  S.wLocie = wpis;
+  zsynchronizujWisiace();
+  var dataWyslania = S.data; // data znana w chwili tapnięcia-wysyłki
+  wywolaj(wpis.akcja, { token: TOKEN, id: wpis.id, data: dataWyslania }, function (e, w) {
+    S.wLocie = null;
+
+    // błąd sesji/arkusza = koniec świata dla całej kolejki: logowanie
+    // albo ekran problemu z arkuszem. Nie rozliczamy per-zawodnik, bo
+    // nie wiemy, co serwer zdążył zapisać → pełny dajStan porządkuje.
+    var blad = e ? '_polaczenie' : (w && w.blad);
+    if (blad === 'ARKUSZ_BRAK' || blad === 'BRAK_DOSTEPU' || blad === 'BLAD_TOKENA') {
+      S.kolejka = [];
+      zsynchronizujWisiace();
+      obsluzBlad(e, w);
+      return;
+    }
+
+    // błąd POŁĄCZENIA (sieć padła): nie wiemy, czy serwer zapisał.
+    // Revert optymistycznego znaczenia tego kafla (serwer wygrywa),
+    // dymek „Ponów", kolejka leci dalej.
+    if (e) {
+      cofnijOptymizm(wpis, dataWyslania);
+      S.bladAkcji = e.message;
+      zsynchronizujWisiace();
+      renderuj();
+      wysylaKolejke();
+      return;
+    }
+
+    if (!w.ok) {
+      // błąd biznesowy tej operacji: revert kafla + dymek; reszta leci.
+      cofnijOptymizm(wpis, dataWyslania);
+      S.bladAkcji = (w && w.opis) || w.blad || 'Nieznany błąd';
+      zsynchronizujWisiace();
+      renderuj();
+      wysylaKolejke();
+      return;
+    }
+
+    // SUKCES: rozliczamy per-zawodnik — bierzemy obecności dnia z odpowiedzi
+    // (serwer v0.2.6+ dokleja stan SPÓJNY z tą operacją). NIE podstawiamy
+    // całego stanu, a dnia nie kopiujemy wprost: intencje czekające w kolejce
+    // serwer jeszcze nie zna (odpowiedź NIE może cofnąć ich optymistycznych
+    // znaczeń) — rozliczamy je po ich własnej intencji. Ktoś inny mógł
+    // zapisać się w międzyczasie — jego wpis z odpowiedzi zostaje.
+    if (w && w.stan && w.stan.obecnosci && w.stan.obecnosci[dataWyslania] && !w.stan.brakDostepu) {
+      var nowy = w.stan.obecnosci[dataWyslania].slice();
+      S.kolejka.forEach(function (wp) {
+        var i = nowy.indexOf(wp.id);
+        if (wp.akcja === 'zapiszObecnosc' && i === -1) nowy.push(wp.id);
+        if (wp.akcja === 'usunObecnosc' && i !== -1) nowy.splice(i, 1);
+      });
+      S.stan.obecnosci[dataWyslania] = nowy;
+    } else {
+      // serwer starszy niż v0.2.6 (bez stanu w odpowiedzi): zostawiamy
+      // znaczenie optymistyczne — potwierdzi je najbliższy dajStan;
+      // spójność pełna wróci przy F5/odświeżeniu.
+    }
+    zsynchronizujWisiace();
+    renderuj();
+    wysylaKolejke(); // następna operacja z kolejki
+  });
+}
+
+/* Revert optymistycznego znaczenia kafla po błędzie: wracamy do stanu
+ * sprzed tapnięcia = odwrotność intencji operacji (zapis padł → nie
+ * był obecny; usunięcie padło → znów obecny). Serwer wygrywa. */
+function cofnijOptymizm(wpis, data) {
+  var dzien = S.stan.obecnosci[data] || [];
+  var idx = dzien.indexOf(wpis.id);
+  if (wpis.akcja === 'zapiszObecnosc' && idx !== -1) dzien.splice(idx, 1);
+  if (wpis.akcja === 'usunObecnosc' && idx === -1) dzien.push(wpis.id);
+  S.stan.obecnosci[data] = dzien;
+  delete S.tapy[wpis.id]; // licznik 3-tapów nie ma już sensu
+  if (S.timery[wpis.id]) { clearTimeout(S.timery[wpis.id]); delete S.timery[wpis.id]; }
 }
 
 /* wspólna obsługa błędów API (protokół z doPost v0.2.0) */
 function obsluzBlad(e, w) {
   var blad = e ? e.message : (w && w.blad);
   if (blad === 'ARKUSZ_BRAK') {
+    // r30: wraz z wisiącymi czyścimy kolejkę (wywołania z kolejki
+    // czyszczą ją PRZED obsluzBlad; tu zabezpieczenie dla innych ścieżek)
+    S.kolejka = [];
     S.wisiace = {};
     odswiezStan();
     return;
