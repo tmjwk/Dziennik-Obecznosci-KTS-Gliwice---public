@@ -1,5 +1,5 @@
 /* =================================================================
- * Dziennik Obecności KTS Gliwice — frontend v0.2.5
+ * Dziennik Obecności KTS Gliwice — frontend v0.2.7
  * Przepływ (instrukcja właściciela, runda 17):
  *   1) użytkownik wchodzi na https://tmjwk.github.io/Dziennik-Obecznosci-
  *      KTS-Gliwice---public/ (strona hostowana na GitHub Pages),
@@ -30,11 +30,23 @@
  * potwierdza ją z arkuszem (do 3 prób, po czym serwer wygrywa).
  * + layout: topbar Obecności w JEDNYM wierszu (Data, szukaj, sortowanie
  *   razem z tytułem; na telefonie zawija się do dwóch linii).
+ *
+ * r28 („ciągle muszę się logować — nawet po przeładowaniu strony"):
+ * 1) SESJA ZAPAMIĘTANA: token GIS trzymamy w localStorage — F5/ponowne
+ *    otwarcie strony wchodzi od razu do dziennika („Wracam do
+ *    dziennika…"), bez klikania Google. Wygaśnięcie tokenu (~1 h) =
+ *    BLAD_TOKENA → sprzątamy sesję i wracamy do ekranu logowania.
+ *    „Wyloguj" (nowy link w stopce) czyści sesję na pewno.
+ * 2) DOCIELOWE ODŚWIEŻANIE (zgodnie z ustaleniem): backend v0.2.6+
+ *    dokleja do każdej odpowiedzi mutacji pełny „stan" z tego samego
+ *    wykonania (spójny z zapisem) → przyjmijStan() bierze go bez
+ *    dajStan ani retry. Dopóki serwer jest starszy, działa fallback
+ *    z rundy 27 (merge lokalny + potwierdzany retry).
  * ================================================================= */
 
 'use strict';
 
-var WERSJA_UI = 'v0.2.6';
+var WERSJA_UI = 'v0.2.7';
 
 /* r25: najstarsza wersja API (Apps Script), z jaką ta strona umie
  * współpracować. v0.2.4 = akcje grup (dodajGrupe/edytujGrupe/usunGrupe);
@@ -180,6 +192,11 @@ function wywolaj(akcja, dane, cb) {
 /* token Google (GIS) — doklejany do KAŻDEGO żądania wymagającego logowania */
 var TOKEN = '';
 
+/* r28: czy user właśnie świadomie się wylogował — tłumi One Tap na
+ * najbliższym ekranie logowania (nie wsuwamy konta zaraz po Wyloguj);
+ * resetowane przy wejściu na stronę (F5 = świadome odwiedzenie) */
+var WYLOGOWANY_WLASNIE = false;
+
 /* ------------------------------------------------ stan aplikacji */
 var S = {
   stan: null,            // odpowiedź dajStan
@@ -192,6 +209,27 @@ var S = {
   timery: {},            // timery resetu tapów per zawodnik
   wisiace: {}            // { idZawodnika: 'zapis'|'usun'|'blad' }
 };
+
+/* ------------------------------------------------ sesja (r28)
+ * Przeładowanie strony (F5) dotąd wyrzucało do logowania: token GIS
+ * żył tylko w pamięci strony. Teraz zapisujemy go w localStorage —
+ * odświeżenie strony = od razu apka, bez klikania Google. Wygasły token
+ * (Google ID ma ~1 h) → BLAD_TOKENA → czyszczony i One Tap przywraca
+ * logowanie jednym klikiem. „Wyloguj" czyści token na pewno.
+ * localStorage jest OK: to krótkożyjący token wystawiony dla TEJ strony
+ * (aud), nie hasło; ktoś z dostępem do przeglądarki ma i tak dostęp
+ * do zalogowanej sesji Google. */
+var KLUCZ_SESJI = 'dziennik_token';
+
+function zapiszSesje(token) {
+  try { localStorage.setItem(KLUCZ_SESJI, token); } catch (ign) {}
+}
+function wyczyscSesje() {
+  try { localStorage.removeItem(KLUCZ_SESJI); } catch (ign) {}
+}
+function odczytajSesje() {
+  try { return localStorage.getItem(KLUCZ_SESJI) || ''; } catch (ign) { return ''; }
+}
 
 /* ------------------------------------------------ pomocnicze */
 function lokalnaData(d) {
@@ -288,7 +326,8 @@ function renderuj() {
       (lista.length === 0 ? '<p class="oplucie" style="text-align:center">Brak zawodników spełniających kryteria.</p>' : '') +
     '</div>' +
     '<div class="stopka">' +
-      '<p class="wersja">' + esc(S.stan.email) + ' · strona ' + WERSJA_UI + ' · serwer ' + esc(S.stan.wersja || '?') + '</p>' +
+      '<p class="wersja">' + esc(S.stan.email) + ' · strona ' + WERSJA_UI + ' · serwer ' + esc(S.stan.wersja || '?') +
+        ' · <button class="link-wyloguj" id="stopka-wyloguj" title="Zakończ sesję na tym urządzeniu">Wyloguj</button></p>' +
       '<div class="wiersz">' +
         '<button class="on" id="stopka-obecnosc">📋 Obecność</button>' +
         '<button id="stopka-czlonkowie">👥 Członkowie</button>' +
@@ -340,7 +379,7 @@ function modalGrupy(g) {
         if (!w.ok) { bladModalny(w); return; }
         if (S.grupa === g.kod) S.grupa = '*';
         // r26: optymistyczne usunięcie lokalne + odświeżenie z potwierdzeniem
-        scalZmiane(function (stan) {
+        przyjmijStan(w, function (stan) {
           stan.grupy = stan.grupy.filter(function (x) { return x.kod !== g.kod; });
         });
       });
@@ -361,7 +400,7 @@ function modalGrupy(g) {
       // r26: grupa widoczna OD RAZU (optymistycznie), a odświeżenie
       // potwierdza ją z arkusza (retry, gdy odczyt jeszcze nie widzi)
       if (nowa) {
-        scalZmiane(function (stan) {
+        przyjmijStan(w, function (stan) {
           if (!stan.grupy.some(function (x) { return x.kod === kod; })) {
             stan.grupy.push({ kod: kod, nazwa: nazwa, dni: dni });
             stan.grupy.sort(function (a, b) { return a.kod.localeCompare(b.kod, 'pl'); });
@@ -370,7 +409,7 @@ function modalGrupy(g) {
           return serwer.grupy.some(function (x) { return x.kod === kod; });
         });
       } else {
-        scalZmiane(function (stan) {
+        przyjmijStan(w, function (stan) {
           var x = null;
           stan.grupy.forEach(function (g2) { if (g2.kod === kod) x = g2; });
           if (x) { x.nazwa = nazwa; x.dni = dni; }
@@ -494,6 +533,10 @@ function obsluzBlad(e, w) {
   }
   if (blad === 'BRAK_DOSTEPU' || blad === 'BLAD_TOKENA') {
     // sesja wygasła / token odrzucony / zdjęto z białej listy → logowanie
+    // r28: czyścimy zapamiętaną sesję (inaczej start() „wracałby" martwym
+    // tokenem w pętli); disableAutoSelect — żeby One Tap nie wskrzeszał
+    // konta zaraz po wygaśnięciu
+    wyczyscSesje();
     TOKEN = '';
     S.stan = null;
     start();
@@ -570,7 +613,8 @@ function renderujCzlonkow(app) {
       (S.bladAkcji ? '<p class="oplucie" style="color:var(--blad)">Ostatnia operacja się nie powiodła: ' + esc(S.bladAkcji) + ' — spróbuj ponownie.</p>' : '') +
     '</div>' +
     '<div class="stopka">' +
-      '<p class="wersja">' + esc(S.stan.email) + ' · strona ' + WERSJA_UI + ' · serwer ' + esc(S.stan.wersja || '?') + '</p>' +
+      '<p class="wersja">' + esc(S.stan.email) + ' · strona ' + WERSJA_UI + ' · serwer ' + esc(S.stan.wersja || '?') +
+        ' · <button class="link-wyloguj" id="stopka-wyloguj" title="Zakończ sesję na tym urządzeniu">Wyloguj</button></p>' +
       '<div class="wiersz">' +
         '<button id="stopka-obecnosc">📋 Obecność</button>' +
         '<button class="on" id="stopka-czlonkowie">👥 Członkowie</button>' +
@@ -627,7 +671,7 @@ function modalImportu() {
       // szczegółów nie scalamy (import zwraca tylko liczby) — dajStan
       // dowiezie stan, retry aż go zobaczy (liczba zawodników rośnie)
       var przed = S.stan.zawodnicy.length;
-      scalZmiane(function () { /* licznik nietykalny do potwierdzenia */ },
+      przyjmijStan(w, function () { /* licznik nietykalny do potwierdzenia */ },
         function (serwer) { return serwer.zawodnicy.length >= przed + (w.dodano || 0); });
     });
   });
@@ -698,7 +742,7 @@ function modalDodajEdytuj(z) {
       // r26: nowy członek widoczny od razu (id zwraca backend), edycja
       // scalana lokalnie; dajStan potwierdza z arkusza (z retry)
       if (z) {
-        scalZmiane(function (stan) {
+        przyjmijStan(w, function (stan) {
           stan.zawodnicy.forEach(function (c) {
             if (c.id === z.id) { c.imie = imie; c.nazwisko = nazwisko; c.grupa = grupa; c.ur = ur; }
           });
@@ -709,7 +753,7 @@ function modalDodajEdytuj(z) {
         });
       } else {
         var nowyId = w.id || '';
-        scalZmiane(function (stan) {
+        przyjmijStan(w, function (stan) {
           if (nowyId && !stan.zawodnicy.some(function (c) { return c.id === nowyId; })) {
             stan.zawodnicy.push({ id: nowyId, imie: imie, nazwisko: nazwisko, grupa: grupa, aktywny: true, dolaczyl: lokalnaData(new Date()), ur: ur || '', uwagi: '' });
           }
@@ -733,8 +777,22 @@ function modalDodajEdytuj(z) {
  *     natychmiast), 2) odświeżamy z potwierdzeniem: dopóki dajStan
  *     nie pokaże zmiany, ponawiamy (max 3 próby) — po czym stan
  *     serwera wygrywa (arkusz = prawda).
- * scalZmiane() = wspólny mechanizm; fetch API nie zwraca nam pełnego
- * stanu (zwraca ok/id), więc scalamy lokalnie po udanej akcji. */
+ * r28 (docelowe rozwiązanie): backend v0.2.6+ dokleja do KAŻDEJ
+ * odpowiedzi mutacji pełny „stan" z tego samego wykonania (spójny
+ * z zapisem). Gdy jest — bierzemy go bez żadnego dajStan ani retry;
+ * scalanie/retry zostaje jako fallback dla starszego serwera. */
+function przyjmijStan(w, modyfikator, potwierdz) {
+  // fast-path: serwer v0.2.6+ sam przysłał stan mutacji
+  if (w && w.stan && !w.stan.brakDostepu) {
+    S.stan = w.stan;
+    if (!S.data) S.data = w.stan.dzisiaj || lokalnaData(new Date());
+    renderuj();
+    return;
+  }
+  // fallback (serwer v0.2.5): optymistyczny merge + potwierdzany retry
+  scalZmiane(modyfikator, potwierdz);
+}
+
 function scalZmiane(modyfikator, potwierdz) {
   if (!S.stan) return;
   modyfikator(S.stan);
@@ -757,7 +815,14 @@ function odswiezStan(cb, proby, potwierdz) {
         '<p style="font-size:.8rem;color:var(--szary)">To zwykle chwilowa niedostępność. Jeśli trwa — zgłoś właścicielowi.</p></div>';
       return;
     }
-    if (w && w.blad === 'BLAD_TOKENA') { TOKEN = ''; start(); return; }
+    if (w && w.blad === 'BLAD_TOKENA') {
+      // r28: wygasła sesja — sprzątamy zapamiętany token (żeby F5 nie
+      // kręciło w kółko „Wracam do dziennika…") i wracamy do logowania
+      wyczyscSesje();
+      TOKEN = '';
+      start();
+      return;
+    }
     if (w && w.blad === 'ARKUSZ_BRAK') {
       S.stan = { arkuszBrak: true, brakDostepu: true };
       renderuj();
@@ -819,6 +884,7 @@ function podpinz() {
   if (el('btn-czlonkowie')) el('btn-czlonkowie').addEventListener('click', function () {
     S.trybCzlonkowie = true; S.szukane = ''; renderuj();
   });
+  if (el('stopka-wyloguj')) el('stopka-wyloguj').addEventListener('click', function () { wyloguj(); });
   if (el('stopka-obecnosc')) el('stopka-obecnosc').addEventListener('click', function () {
     S.trybCzlonkowie = false; S.szukane = ''; renderuj();
   });
@@ -915,6 +981,8 @@ function podpinzCzlonkow() {
 
   document.getElementById('btn-import').addEventListener('click', function () { modalImportu(); });
   document.getElementById('btn-dodaj').addEventListener('click', function () { modalDodajEdytuj(null); });
+  var przWyloguj = document.getElementById('stopka-wyloguj');
+  if (przWyloguj) przWyloguj.addEventListener('click', function () { wyloguj(); });
   document.getElementById('stopka-obecnosc').addEventListener('click', function () {
     S.trybCzlonkowie = false; S.szukane = ''; renderuj();
   });
@@ -959,6 +1027,8 @@ function podpinzAkcjeCzlonkow() {
  * UWAGA: konfiguracja (API/klucz) zostaje — to ustawienia strony, nie sesji. */
 function wyloguj() {
   TOKEN = '';
+  wyczyscSesje(); // r28: „zaloguj jako ktoś inny" NIE może wrócić starym tokenem
+  WYLOGOWANY_WLASNIE = true; // r28: bez One Tap zaraz po świadomym wylogowaniu
   try {
     if (typeof google !== 'undefined' && google.accounts && google.accounts.id) {
       google.accounts.id.disableAutoSelect();
@@ -1027,6 +1097,18 @@ function zainicjujGoogle() {
         document.getElementById('przycisk-google'),
         { theme: 'outline', size: 'large', text: 'signin_with', locale: 'pl' }
       );
+      // r28: One Tap — na ekranie logowania Google próbuje najpierw
+      // jednoklikowego wyboru konta (zapisanego w przeglądarce);
+      // wyłączone tylko gdy user świadomie wylogował się przed chwilą
+      // (skipped moment) — wtedy pełne okno wyboru konta
+      if (!WYLOGOWANY_WLASNIE) {
+        try {
+          google.accounts.id.prompt(function (n) {
+            //„moment" notyfikacji: skippowane (rate limit / wylogowanie)
+            // = nic; user może kliknąć zwykły przycisk poniżej
+          });
+        } catch (ign) { }
+      }
       return;
     }
     if (++proby < 40) setTimeout(czekaj, 250); // 10 s na załadowanie GIS
@@ -1035,6 +1117,7 @@ function zainicjujGoogle() {
 
 function poZalogowaniu(token) {
   TOKEN = token;
+  zapiszSesje(token); // r28: przeładowanie strony nie wyrzuca do logowania
   document.getElementById('app').innerHTML =
     '<div class="ekran-pelny"><div class="spinner"></div><p>Sprawdzam dostęp…</p></div>';
   odswiezStan();
@@ -1127,7 +1210,17 @@ function start() {
   // r17 (ekran logowania ma być PIERWSZY, zawsze): konfiguracja strony
   // nie blokuje wejścia — braki pokazuje żółta kartka na ekranie
   // logowania, kartę ustawień otwiera właściciel linkiem na dole.
+  // r28: zapamiętana sesja (localStorage) — F5 NIE wyrzuca do logowania;
+  // token wygasły sprzątamy po stronie BLAD_TOKENA w odswiezStan.
   if (TOKEN) { odswiezStan(); return; }
+  var zapamietany = odczytajSesje();
+  if (zapamietany) {
+    TOKEN = zapamietany;
+    document.getElementById('app').innerHTML =
+      '<div class="ekran-pelny"><div class="spinner"></div><p>Wracam do dziennika…</p></div>';
+    odswiezStan();
+    return;
+  }
   // jest API? → zdrowy ping (r19: wdrożenie z dostępem „tylko ja"
   // odpowiada 401 — wykrywamy i mówimy właścicielowi, co poprawić,
   // żeby trener nie widział tylko wiecznego kręcenia)
