@@ -35,6 +35,9 @@
       box-shadow: 0 1px 4px rgba(0,0,0,.25);
     }
     .topbar .rzad1 { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+    /* r27: JEDEN wiersz — tytuł odpycha resztę w prawo; szukaj zjada
+     * wolną przestrzeń, ale NIE wypycha braci z wiersza (min-width mały);
+     * na telefonie zawija się naturalnie do 2 linii */
     .topbar .tytul { font-weight: 700; font-size: 1.02rem; margin-right: auto; }
     .topbar .licznik { font-size: .88rem; background: rgba(255,255,255,.16); padding: 3px 10px; border-radius: 999px; white-space: nowrap; }
     .btn-ikona {
@@ -44,6 +47,8 @@
       cursor: pointer;
     }
     .btn-ikona:active { background: rgba(255,255,255,.3); }
+    /* r27: rzad2 zlikwidowany — wszystko w rzad1; reguła zostaje na
+     * wypadek starszych renderów członków (szukaj w drugim wierszu) */
     .rzad2 { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-top: 8px; }
     .btn-data { display: flex; align-items: center; gap: 4px; background: rgba(255,255,255,.14); color: var(--akcent-c); border: 1px solid rgba(255,255,255,.35); border-radius: 8px; padding: 5px 8px; min-height: 40px; font-size: .95rem; }
     input[type="date"].data-input {
@@ -51,9 +56,17 @@
       font-size: .95rem; font-family: inherit; min-height: 36px; color-scheme: dark;
     }
     .szukaj {
-      flex: 1 1 130px; min-width: 120px;
+      flex: 1 1 130px; min-width: 110px;
       background: rgba(255,255,255,.92); border: none; border-radius: 8px;
       padding: 8px 10px; font-size: .95rem; min-height: 40px;
+    }
+    @media (max-width: 640px) {
+      /* r27: telefon — tytuł i licznik w pierwszej linii, reszta zawija
+       * się pod nie; szukaj rozciąga się na pełną szerokość wiersza */
+      .topbar .rzad1 { gap: 6px; }
+      .topbar .tytul { margin-right: 0; }
+      .topbar .licznik { margin-right: auto; }
+      .szukaj { flex-basis: 100%; order: 10; }
     }
     .przelacznik { display: flex; border: 1px solid rgba(255,255,255,.35); border-radius: 8px; overflow: hidden; }
     .przelacznik button {

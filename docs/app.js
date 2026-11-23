@@ -21,11 +21,20 @@
  *  - bladModalny(): błędy akcji z modali (grupy/członek/import) jako
  *    alert() — przebija się przez modal, dymek na liście nie;
  *  - stopka pokazuje obie wersje: „strona vX · serwer vY".
+ *
+ * r27 („grupa dodaje się dopiero po przelogowaniu"): dajStan tuż po
+ * zapisie potrafi wrócić ze stanem sprzed zmiany — Google Sheets nie
+ * gwarantuje spójności odczytu między kolejnymi wykonaniami Apps
+ * Script. Stąd scalZmiane()/odswiezStan(proby, potwierdz): mutacja
+ * jest NATYCHMIAST scalana lokalnie (optymistycznie), a dajStan
+ * potwierdza ją z arkuszem (do 3 prób, po czym serwer wygrywa).
+ * + layout: topbar Obecności w JEDNYM wierszu (Data, szukaj, sortowanie
+ *   razem z tytułem; na telefonie zawija się do dwóch linii).
  * ================================================================= */
 
 'use strict';
 
-var WERSJA_UI = 'v0.2.5';
+var WERSJA_UI = 'v0.2.6';
 
 /* r25: najstarsza wersja API (Apps Script), z jaką ta strona umie
  * współpracować. v0.2.4 = akcje grup (dodajGrupe/edytujGrupe/usunGrupe);
@@ -247,18 +256,19 @@ function renderuj() {
 
   var html =
     '<div class="topbar">' +
+      /* r27: JEDEN wiersz — „Obecność", licznik, Data, szukaj, sortowanie,
+       * Członkowie. Na wąskim ekranie zawija się do drugiego wiersza
+       * (flex-wrap), na szerokim mieści się w jednym. */
       '<div class="rzad1">' +
         '<span class="tytul">Obecność</span>' +
         '<span class="licznik">' + ileObecnych + '/' + lista.length + ' obecnych</span>' +
-        '<button class="btn-ikona" id="btn-czlonkowie" title="Członkowie">👥 Członkowie</button>' +
-      '</div>' +
-      '<div class="rzad2">' +
         '<span class="btn-data">📅 <input type="date" class="data-input" id="data" value="' + S.data + '" max="' + lokalnaData(new Date()) + '"></span>' +
         '<input class="szukaj" id="szukaj" type="search" placeholder="Szukaj…" value="' + esc(S.szukane) + '">' +
         '<div class="przelacznik">' +
           '<button id="sort-imie" class="' + (S.sortowanie === 'imie' ? 'on' : '') + '">A→Z imię</button>' +
           '<button id="sort-nazwisko" class="' + (S.sortowanie === 'nazwisko' ? 'on' : '') + '">A→Z nazwisko</button>' +
         '</div>' +
+        '<button class="btn-ikona" id="btn-czlonkowie" title="Członkowie">👥 Członkowie</button>' +
       '</div>' +
     '</div>' +
     '<div class="grupy">' +
@@ -329,7 +339,10 @@ function modalGrupy(g) {
         if (e) { alert('Błąd: ' + e.message); return; }
         if (!w.ok) { bladModalny(w); return; }
         if (S.grupa === g.kod) S.grupa = '*';
-        odswiezStan();
+        // r26: optymistyczne usunięcie lokalne + odświeżenie z potwierdzeniem
+        scalZmiane(function (stan) {
+          stan.grupy = stan.grupy.filter(function (x) { return x.kod !== g.kod; });
+        });
       });
     });
   }
@@ -345,7 +358,28 @@ function modalGrupy(g) {
       if (e) { alert('Błąd zapisu: ' + e.message); return; }
       if (!w.ok) { bladModalny(w); return; }
       tlo.remove();
-      odswiezStan();
+      // r26: grupa widoczna OD RAZU (optymistycznie), a odświeżenie
+      // potwierdza ją z arkusza (retry, gdy odczyt jeszcze nie widzi)
+      if (nowa) {
+        scalZmiane(function (stan) {
+          if (!stan.grupy.some(function (x) { return x.kod === kod; })) {
+            stan.grupy.push({ kod: kod, nazwa: nazwa, dni: dni });
+            stan.grupy.sort(function (a, b) { return a.kod.localeCompare(b.kod, 'pl'); });
+          }
+        }, function (serwer) {
+          return serwer.grupy.some(function (x) { return x.kod === kod; });
+        });
+      } else {
+        scalZmiane(function (stan) {
+          var x = null;
+          stan.grupy.forEach(function (g2) { if (g2.kod === kod) x = g2; });
+          if (x) { x.nazwa = nazwa; x.dni = dni; }
+        }, function (serwer) {
+          var x = null;
+          serwer.grupy.forEach(function (g2) { if (g2.kod === kod) x = g2; });
+          return x ? (x.nazwa === nazwa && x.dni === dni) : false;
+        });
+      }
     };
     if (nowa) wywolaj('dodajGrupe', { token: TOKEN, kod: kod, nazwa: nazwa, dni: dni }, zakoncz);
     else wywolaj('edytujGrupe', { token: TOKEN, kod: kod, nazwa: nazwa, dni: dni }, zakoncz);
@@ -589,7 +623,12 @@ function modalImportu() {
         raport += '\n\nWiersze z problemami (popraw i wklej ponownie tylko te):\n' + w.bledy.join('\n');
       }
       alert(raport);
-      odswiezStan();
+      // r26: lista od razu pełna (optymistyczne odświeżenie z potwierdzeniem);
+      // szczegółów nie scalamy (import zwraca tylko liczby) — dajStan
+      // dowiezie stan, retry aż go zobaczy (liczba zawodników rośnie)
+      var przed = S.stan.zawodnicy.length;
+      scalZmiane(function () { /* licznik nietykalny do potwierdzenia */ },
+        function (serwer) { return serwer.zawodnicy.length >= przed + (w.dodano || 0); });
     });
   });
 }
@@ -656,15 +695,58 @@ function modalDodajEdytuj(z) {
       tlo.remove();
       if (e) { alert('Błąd zapisu: ' + e.message); return; }
       if (!w.ok) { bladModalny(w); return; }
-      odswiezStan();
+      // r26: nowy członek widoczny od razu (id zwraca backend), edycja
+      // scalana lokalnie; dajStan potwierdza z arkusza (z retry)
+      if (z) {
+        scalZmiane(function (stan) {
+          stan.zawodnicy.forEach(function (c) {
+            if (c.id === z.id) { c.imie = imie; c.nazwisko = nazwisko; c.grupa = grupa; c.ur = ur; }
+          });
+        }, function (serwer) {
+          var c = null;
+          serwer.zawodnicy.forEach(function (x) { if (x.id === z.id) c = x; });
+          return c ? (c.imie === imie && c.nazwisko === nazwisko && c.grupa === grupa) : false;
+        });
+      } else {
+        var nowyId = w.id || '';
+        scalZmiane(function (stan) {
+          if (nowyId && !stan.zawodnicy.some(function (c) { return c.id === nowyId; })) {
+            stan.zawodnicy.push({ id: nowyId, imie: imie, nazwisko: nazwisko, grupa: grupa, aktywny: true, dolaczyl: lokalnaData(new Date()), ur: ur || '', uwagi: '' });
+          }
+        }, function (serwer) {
+          return !nowyId || serwer.zawodnicy.some(function (c) { return c.id === nowyId; });
+        });
+      }
     };
     if (z) wywolaj('edytujCzlonka', { token: TOKEN, id: z.id, imie: imie, nazwisko: nazwisko, grupa: grupa, ur: ur }, zakoncz);
     else wywolaj('dodajCzlonka', { token: TOKEN, imie: imie, nazwisko: nazwisko, grupa: grupa, ur: ur }, zakoncz);
   });
 }
 
-/* ------------------------------------------------ odświeżanie */
-function odswiezStan(cb) {
+/* ------------------------------------------------ odświeżanie: patrz scalZmiane/odswiezStan wyżej (r26) */
+
+/* r26 („grupa dodaje się dopiero po przelogowaniu"): Google Sheets
+ * NIE gwarantuje, że odczyt w KOLEJNYM wykonaniu Apps Script zobaczy
+ * zapis z wykonania poprzedniego (dajStan tuż po dodajGrupe potrafi
+ * wrócić ze stanem sprzed zmiany). Dlatego po każdej mutacji:
+ *  1) OPTYMISTYCZNIE scalamy zmianę do S.stan (użytkownik widzi ją
+ *     natychmiast), 2) odświeżamy z potwierdzeniem: dopóki dajStan
+ *     nie pokaże zmiany, ponawiamy (max 3 próby) — po czym stan
+ *     serwera wygrywa (arkusz = prawda).
+ * scalZmiane() = wspólny mechanizm; fetch API nie zwraca nam pełnego
+ * stanu (zwraca ok/id), więc scalamy lokalnie po udanej akcji. */
+function scalZmiane(modyfikator, potwierdz) {
+  if (!S.stan) return;
+  modyfikator(S.stan);
+  renderuj();
+  odswiezStan(null, 3, potwierdz);
+}
+
+/* r26: odświeżenie z „potwierdzeniem zmiany". potwierdz(stanSerwera) →
+ * true = odczyt już widzi naszą zmianę (koniec), false = jeszcze nie →
+ * kolejna próba po 1,2s (max `proby`). Bez potwierdzenia działa jak
+ * zwykłe odswiezStan (jedno dajStan + render). */
+function odswiezStan(cb, proby, potwierdz) {
   wywolaj('dajStan', { token: TOKEN }, function (e, w) {
     if (e) {
       document.getElementById('app').innerHTML =
@@ -689,6 +771,16 @@ function odswiezStan(cb) {
       renderuj();
       if (cb) cb();
       return;
+    }
+    // r27: odczyt jeszcze NIE widzi naszej zmiany (spójność arkusza) →
+    // NIE nadpisujemy stanu lokalnego (optymistyczna grupa by zniknęła);
+    // ponawiamy po 1,2 s; po wyczerpaniu prób arkusz wygrywa (przyjmujemy
+    // odczyt — użytkownik zobaczy stan faktyczny)
+    if (potwierdz && !potwierdz(w)) {
+      if (proby > 1) {
+        setTimeout(function () { odswiezStan(cb, proby - 1, potwierdz); }, 1200);
+        return;
+      }
     }
     S.stan = w;
     if (!S.data) S.data = w.dzisiaj || lokalnaData(new Date());
@@ -850,6 +942,13 @@ function podpinzAkcjeCzlonkow() {
         if (!w.ok) { obsluzBlad(null, w); return; }
         z.aktywny = nowyStan;
         renderuj();
+        // r26: potwierdzenie z arkusza (dajStan może jeszcze nie widzieć
+        // zmiany — wtedy by wrócił stary stan i kafel „wskrzesiłby" się)
+        odswiezStan(null, 3, function (serwer) {
+          var c = null;
+          serwer.zawodnicy.forEach(function (x) { if (x.id === z.id) c = x; });
+          return c ? c.aktywny === nowyStan : true;
+        });
       });
     });
   });
