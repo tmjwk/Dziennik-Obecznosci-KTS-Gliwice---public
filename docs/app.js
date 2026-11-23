@@ -1,5 +1,5 @@
 /* =================================================================
- * Dziennik Obecności KTS Gliwice — frontend v0.2.7
+ * Dziennik Obecności KTS Gliwice — frontend v0.2.8
  * Przepływ (instrukcja właściciela, runda 17):
  *   1) użytkownik wchodzi na https://tmjwk.github.io/Dziennik-Obecznosci-
  *      KTS-Gliwice---public/ (strona hostowana na GitHub Pages),
@@ -42,11 +42,19 @@
  *    wykonania (spójny z zapisem) → przyjmijStan() bierze go bez
  *    dajStan ani retry. Dopóki serwer jest starszy, działa fallback
  *    z rundy 27 (merge lokalny + potwierdzany retry).
+ *
+ * r29 („zmienialiśmy layout, ale tylko desktop — teraz mobile"): telefon
+ * ma inny priorytet niż desktop. Rządek topbara: „Obecność 3/4" (licznik
+ * bez słowa „obecnych" — tytuł już mówi), 📅 23.11 (kompakt; klikiem
+ * natywny picker), 🔍 (lupa rozwija pole szukaj w drugim wierszu), i
+ * sortowanie (przełącznik A→Z imię/nazwisko). „👥 Członkowie" ZNIKA z
+ * topbara — przejmuje je stały pasek na dole ekranu (istniejący od r6),
+ * pod listą, zawsze pod kciukiem. Desktop BEZ zmian (r27).
  * ================================================================= */
 
 'use strict';
 
-var WERSJA_UI = 'v0.2.7';
+var WERSJA_UI = 'v0.2.8';
 
 /* r25: najstarsza wersja API (Apps Script), z jaką ta strona umie
  * współpracować. v0.2.4 = akcje grup (dodajGrupe/edytujGrupe/usunGrupe);
@@ -294,19 +302,36 @@ function renderuj() {
 
   var html =
     '<div class="topbar">' +
-      /* r27: JEDEN wiersz — „Obecność", licznik, Data, szukaj, sortowanie,
-       * Członkowie. Na wąskim ekranie zawija się do drugiego wiersza
-       * (flex-wrap), na szerokim mieści się w jednym. */
+      /* r27/r29: desktop — JEDEN wiersz („Obecność", licznik, Data, szukaj,
+       * sortowanie, Członkowie). Mobile (≤640px, CSS): z topbara znika
+       * „Członkowie" (przejmuje je stały pasek na dole ekranu), szukaj
+       * chowa się za lupą (drugi wiersz po rozwinięciu), licznik i data
+       * robią się kompaktowe — wszystko po to, by reszta zmieściła się
+       * w jednym wierszu na telefonie. */
       '<div class="rzad1">' +
         '<span class="tytul">Obecność</span>' +
-        '<span class="licznik">' + ileObecnych + '/' + lista.length + ' obecnych</span>' +
-        '<span class="btn-data">📅 <input type="date" class="data-input" id="data" value="' + S.data + '" max="' + lokalnaData(new Date()) + '"></span>' +
+        /* r29: licznik w dwóch wariantach — desktop „3/4 obecnych",
+         * mobile „3/4" (CSS wybiera; tekst musi być w JS, CSS go nie skróci) */
+        '<span class="licznik"><span class="pelny">' + ileObecnych + '/' + lista.length + ' obecnych</span><span class="krotki">' + ileObecnych + '/' + lista.length + '</span></span>' +
+        '<span class="btn-data"><span class="ikona-data">📅</span><input type="date" class="data-input" id="data" value="' + S.data + '" max="' + lokalnaData(new Date()) + '"></span>' +
         '<input class="szukaj" id="szukaj" type="search" placeholder="Szukaj…" value="' + esc(S.szukane) + '">' +
         '<div class="przelacznik">' +
           '<button id="sort-imie" class="' + (S.sortowanie === 'imie' ? 'on' : '') + '">A→Z imię</button>' +
           '<button id="sort-nazwisko" class="' + (S.sortowanie === 'nazwisko' ? 'on' : '') + '">A→Z nazwisko</button>' +
         '</div>' +
         '<button class="btn-ikona" id="btn-czlonkowie" title="Członkowie">👥 Członkowie</button>' +
+        /* r29 mobile: lupa (rozwija szukaj w drugim wierszu) + sort jako
+         * JEDEN przełącznik (tap: imię ⇄ nazwisko). Widoczne TYLKO ≤640px
+         * (CSS); data zostaje natywnym inputem — na telefonie to on
+         * otwiera systemowy picker (niezawodnie, showPicker bywa kapryśny) */
+        '<button class="btn-ikona btn-sort-mobilny" id="btn-sort-k" title="Sortowanie">⇅ ' +
+          (S.sortowanie === 'nazwisko' ? 'Nazwisko' : 'Imię') + '</button>' +
+        '<button class="btn-ikona btn-szukaj-mobilny" id="btn-szukaj" title="Szukaj">🔍</button>' +
+      '</div>' +
+      /* r29 mobile: pole szukaj po rozwinięciu lupą (drugi wiersz topbara);
+       * na desktopie nigdy nie pokazane (media query + klasa .otwarty) */
+      '<div class="rzad2 rzad2-mobilny' + (S.szukane ? ' otwarty' : '') + '" id="rzad2-mobilny"' + (S.szukane ? ' data-otwarty="1"' : '') + '>' +
+        '<input class="szukaj" id="szukaj-mobilny" type="search" placeholder="Szukaj…" value="' + esc(S.szukane) + '">' +
       '</div>' +
     '</div>' +
     '<div class="grupy">' +
@@ -884,6 +909,43 @@ function podpinz() {
   if (el('btn-czlonkowie')) el('btn-czlonkowie').addEventListener('click', function () {
     S.trybCzlonkowie = true; S.szukane = ''; renderuj();
   });
+  /* r29 mobile: lupa rozwija/zwija pole szukaj (drugi wiersz topbara);
+   * przy otwarciu od razu focus — można pisać bez drugiego kliknięcia.
+   * NIE renderujemy od nowa całej strony (fokus by przepadł) — tylko
+   * dodajemy klasę i pokazujemy wiersz. */
+  if (el('btn-szukaj')) el('btn-szukaj').addEventListener('click', function () {
+    var rzad2 = document.getElementById('rzad2-mobilny');
+    if (!rzad2) return;
+    var otwarty = rzad2.dataset.otwarty === '1';
+    if (otwarty && !document.getElementById('szukaj-mobilny').value) {
+      rzad2.dataset.otwarty = ''; // zwijanie tylko pustego pola (nie gubimy wpisu)
+      rzad2.classList.remove('otwarty');
+      this.classList.remove('on');
+    } else {
+      rzad2.dataset.otwarty = '1';
+      rzad2.classList.add('otwarty');
+      this.classList.add('on');
+      document.getElementById('szukaj-mobilny').focus();
+    }
+  });
+  /* r29 mobile: szukaj w drugim wierszu — to samo zachowanie co desktopowe
+   * (filtr w locie, bez pełnego renderu → focus zostaje) */
+  if (el('szukaj-mobilny')) el('szukaj-mobilny').addEventListener('input', function () {
+    S.szukane = this.value;
+    var kontener = document.querySelector('.lista');
+    var lista = widoczni();
+    kontener.innerHTML = lista.map(kafelHtml).join('') +
+      (S.bladAkcji ? dymekBledu() : '') ||
+      '<p class="oplucie" style="text-align:center">Brak zawodników spełniających kryteria.</p>';
+    podpinzKafelki();
+    aktualizujLicznik();
+  });
+  /* r29 mobile: sortowanie jako JEDEN przełącznik — tap przełącza
+   * imię ⇄ nazwisko (labelka przycisku odświeża się w pełnym renderze,
+   * jak w desktopowym ustawSortowanie) */
+  if (el('btn-sort-k')) el('btn-sort-k').addEventListener('click', function () {
+    ustawSortowanie(S.sortowanie === 'nazwisko' ? 'imie' : 'nazwisko');
+  });
   if (el('stopka-wyloguj')) el('stopka-wyloguj').addEventListener('click', function () { wyloguj(); });
   if (el('stopka-obecnosc')) el('stopka-obecnosc').addEventListener('click', function () {
     S.trybCzlonkowie = false; S.szukane = ''; renderuj();
@@ -945,7 +1007,16 @@ function aktualizujLicznik() {
   var lista = widoczni();
   var dzien = S.stan.obecnosci[S.data] || [];
   var ile = lista.filter(function (z) { return dzien.indexOf(z.id) !== -1; }).length;
-  el.textContent = ile + '/' + lista.length + ' obecnych';
+  /* r29: dwa warianty tekstowe (desktop „N/M obecnych", mobile „N/M");
+   * fallback textContent gdyby stary render nie miał spany w środku */
+  var pelny = el.querySelector('.pelny');
+  var krotki = el.querySelector('.krotki');
+  if (pelny && krotki) {
+    pelny.textContent = ile + '/' + lista.length + ' obecnych';
+    krotki.textContent = ile + '/' + lista.length;
+  } else {
+    el.textContent = ile + '/' + lista.length + ' obecnych';
+  }
 }
 
 function podpinzCzlonkow() {
