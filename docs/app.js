@@ -62,12 +62,18 @@ function banerWersji() {
     '</div>';
 }
 
-/* r19: komunikat gdy wdrożenie ma dostęp „tylko ja" (401) — mówi
- * właścicielowi DOKŁADNIE co kliknąć (bez żargonu) */
+/* r19→r25: komunikat gdy /exec nie odpowiada stronie. Dwie przyczyny:
+ * dostęp „tylko ja" (401 bez CORS) albo MARTWY adres (usunięte wdrożenie —
+ * r25: właśnie to się stało: aktualizacja przez usunięcie starego
+ * wdrożenia zabija stary adres; nowe wdrożenie dostaje nowy URL). */
 var PRZYCISK_DOSTEP =
-  'Arkusz (API) odpowiada, ale odrzuca stronę: wdrożenie ma ustawiony dostęp „tylko ja”. ' +
-  'Właścicielu: wejdź w Apps Script → Wdróż → Zarządzaj wdrożeniami → ołówek (✎) → ' +
-  '„Kto ma dostęp” na „Każdy” → Wdróż. Adres API się nie zmieni.';
+  'Arkusz (API) nie odpowiada stronie. Najczęstsze przyczyny:\n' +
+  '1) We wdrożeniu „Kto ma dostęp” nie stoi „Każdy” — Właścicielu: Apps Script → Wdróż → ' +
+  'Zarządzaj wdrożeniami → ✎ → „Kto ma dostęp”: Każdy → Wdróż.\n' +
+  '2) Adres wdrożenia przestał działać — np. przy aktualizacji usunięto stare wdrożenie ' +
+  '(usunięty adres nie wraca, każde nowe wdrożenie dostaje NOWY adres). Właścicielu: ' +
+  'Wdróż → Zarządzaj wdrożeniami → skopiuj adres istniejącego wdrożenia (ikonka 🌐, ' +
+  'kończy się na /exec) i prześlij go Zetowi — wpisze go w konfiguracji strony.';
 
 /* ------------------------------------------------ konfiguracja (config.js + localStorage + #hash) */
 var K = (function () {
