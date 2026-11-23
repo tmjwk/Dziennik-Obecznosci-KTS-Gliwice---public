@@ -80,20 +80,27 @@ var K = (function () {
   var dane = { API: '', KLUCZ: '' };
   // plik config.js = wgłębiona konfiguracja strony (r19: to co Zet wgrywa
   // na stałe do GitHuba jest źródłem prawdy dla wszystkich odwiedzających)
+  var zPliku = { API: '', KLUCZ: '' };
   if (typeof KONFIG === 'object' && KONFIG) {
-    if (KONFIG.API) dane.API = String(KONFIG.API);
-    if (KONFIG.KLUCZ) dane.KLUCZ = String(KONFIG.KLUCZ);
+    if (KONFIG.API) zPliku.API = String(KONFIG.API);
+    if (KONFIG.KLUCZ) zPliku.KLUCZ = String(KONFIG.KLUCZ);
   }
-  // localStorage (karta ustawień / link z hashem) wygrywa TYLKO gdy
-  // sensowny format — śmieć (np. backtick z r17) nie może blokować
-  // wgłębionego configu po stronie właściciela
+  // r26: PRIORYTET PLIKU nad localStorage. Dotąd zapisane w przeglądarce
+  // ustawienia nadpisywały config z GitHuba — gdy adres wdrożenia się
+  // zmieniał (r25: usunięte wdrożenie = martwy URL), każdy, kto był kiedyś
+  // na stronie, celował w 404 mimo poprawnego pliku. Teraz: plik wygrywa,
+  // localStorage tylko DOPEŁNIA brakujące pole (karta ustawień ma sens
+  // tylko zanim Zet wgrybie config). Śmieć w localStorage nie przechodzi
+  // (walidacja formatu zostaje).
   try {
     var zapisane = JSON.parse(localStorage.getItem('konfig') || '{}');
-    if (/^https:\/\/.+\/exec$/.test(String(zapisane.API || ''))) dane.API = String(zapisane.API);
-    if (/^[\w.-]+\.apps\.googleusercontent\.com$/.test(String(zapisane.KLUCZ || ''))) dane.KLUCZ = String(zapisane.KLUCZ);
+    if (!zPliku.API && /^https:\/\/.+\/exec$/.test(String(zapisane.API || ''))) zPliku.API = String(zapisane.API);
+    if (!zPliku.KLUCZ && /^[\w.-]+\.apps\.googleusercontent\.com$/.test(String(zapisane.KLUCZ || ''))) zPliku.KLUCZ = String(zapisane.KLUCZ);
   } catch (ign) { }
-  // link dla trenerów: …/#api=…&klucz=… (zapisujemy raz, potem z hashu można
-  // korzystać wielokrotnie — hash nie zostaje w historii przeglądarki)
+  dane.API = zPliku.API;
+  dane.KLUCZ = zPliku.KLUCZ;
+  // link dla trenerów: …/#api=…&klucz=… — nadal najsilniejszy (jednorazowe
+  // podmienienie adresu, np. awaryjne przed publikacją configu)
   var czesci = (location.hash || '').replace(/^#/, '').split('&');
   var zLinku = false;
   czesci.forEach(function (c) {
