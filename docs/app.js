@@ -1,5 +1,5 @@
 /* =================================================================
- * Dziennik Obecności KTS Gliwice — frontend v0.2.4
+ * Dziennik Obecności KTS Gliwice — frontend v0.2.5
  * Przepływ (instrukcja właściciela, runda 17):
  *   1) użytkownik wchodzi na https://tmjwk.github.io/Dziennik-Obecznosci-
  *      KTS-Gliwice---public/ (strona hostowana na GitHub Pages),
@@ -11,11 +11,56 @@
  * (Google Identity Services) — token weryfikuje API (aud + biała
  * lista w arkuszu). Runda 15: „na git jest strona internetowa
  * (frontend do zapisu danych w arkuszu)".
+ *
+ * r25 („wdrożyłem, a przycisk dalej nie dodaje grupy"): serwer dalej
+ * odpowiadał v0.2.3 — nowe wdrożenie nie weszło, a frontend v0.2.4 wołał
+ * akcje grup, których stary backend nie zna. Błąd rysował się POD
+ * otwartym modalem → użytkownik widział „nic się nie dzieje". Stąd:
+ *  - MIN_WERSJA_API + banerWersji(): widoczny od razu po zalogowaniu
+ *    komunikat, gdy serwer jest starszy niż wymaga strona;
+ *  - bladModalny(): błędy akcji z modali (grupy/członek/import) jako
+ *    alert() — przebija się przez modal, dymek na liście nie;
+ *  - stopka pokazuje obie wersje: „strona vX · serwer vY".
  * ================================================================= */
 
 'use strict';
 
-var WERSJA_UI = 'v0.2.4';
+var WERSJA_UI = 'v0.2.5';
+
+/* r25: najstarsza wersja API (Apps Script), z jaką ta strona umie
+ * współpracować. v0.2.4 = akcje grup (dodajGrupe/edytujGrupe/usunGrupe);
+ * starszy serwer je odrzuci (NIEZNANA_AKCJA). */
+var MIN_WERSJA_API = 'v0.2.4';
+
+/** Porównanie wersji „vX.Y.Z" → -1 | 0 | 1 (liczbowo, nie leksykalnie). */
+function porownajWersje(a, b) {
+  var ka = String(a || '').replace(/^v/, '').split('.');
+  var kb = String(b || '').replace(/^v/, '').split('.');
+  for (var i = 0; i < 3; i++) {
+    var x = parseInt(ka[i], 10) || 0;
+    var y = parseInt(kb[i], 10) || 0;
+    if (x !== y) return x < y ? -1 : 1;
+  }
+  return 0;
+}
+
+/** Czy serwer (arkusz) jest starszy, niż wymaga ta strona? */
+function serwerZaStary() {
+  return !!(S.stan && S.stan.wersja && porownajWersje(S.stan.wersja, MIN_WERSJA_API) < 0);
+}
+
+/** r25: baner o rozjeździe wersji (serwer starszy niż strona) — pokazywany
+ * nad listą w obu widokach; znika sam, gdy właściciel wdroży nowy kod. */
+function banerWersji() {
+  if (!serwerZaStary()) return '';
+  return '<div class="baner-wersji">' +
+    '<b>Strona jest nowsza niż silnik po stronie Google</b> ' +
+    '(serwer: ' + esc(S.stan.wersja) + ', strona: ' + WERSJA_UI + '). ' +
+    'Dodawanie i edycja grup nie zadziała, dopóki właściciel nie wgra nowego kodu: ' +
+    'script.google.com → projekt Dziennika → zaznacz cały kod (Ctrl+A) → wklej nowy → zapisz (Ctrl+S) → ' +
+    'Wdróż → Zarządzaj wdrożeniami → ✎ → Nowa wersja → Wdróż. Po ok. minucie odśwież stronę.' +
+    '</div>';
+}
 
 /* r19: komunikat gdy wdrożenie ma dostęp „tylko ja" (401) — mówi
  * właścicielowi DOKŁADNIE co kliknąć (bez żargonu) */
@@ -214,12 +259,13 @@ function renderuj() {
         ? '<button data-grupa="__nowa" class="grupa-nowa" title="Dodaj pierwszą grupę">＋ Dodaj grupę</button>'
         : '<button data-grupa="__nowa" class="grupa-nowa" title="Dodaj grupę">＋</button>') +
     '</div>' +
+    banerWersji() +
     '<div class="lista">' +
       lista.map(kafelHtml).join('') +
       (lista.length === 0 ? '<p class="oplucie" style="text-align:center">Brak zawodników spełniających kryteria.</p>' : '') +
     '</div>' +
     '<div class="stopka">' +
-      '<p class="wersja">' + esc(S.stan.email) + ' · ' + WERSJA_UI + '</p>' +
+      '<p class="wersja">' + esc(S.stan.email) + ' · strona ' + WERSJA_UI + ' · serwer ' + esc(S.stan.wersja || '?') + '</p>' +
       '<div class="wiersz">' +
         '<button class="on" id="stopka-obecnosc">📋 Obecność</button>' +
         '<button id="stopka-czlonkowie">👥 Członkowie</button>' +
@@ -268,7 +314,7 @@ function modalGrupy(g) {
       wywolaj('usunGrupe', { token: TOKEN, kod: g.kod }, function (e, w) {
         tlo.remove();
         if (e) { alert('Błąd: ' + e.message); return; }
-        if (!w.ok) { obsluzBlad(null, w); return; }
+        if (!w.ok) { bladModalny(w); return; }
         if (S.grupa === g.kod) S.grupa = '*';
         odswiezStan();
       });
@@ -284,7 +330,7 @@ function modalGrupy(g) {
     if (!kod) { alert('Podaj kod grupy (np. GR1).'); return; }
     var zakoncz = function (e, w) {
       if (e) { alert('Błąd zapisu: ' + e.message); return; }
-      if (!w.ok) { obsluzBlad(null, w); return; }
+      if (!w.ok) { bladModalny(w); return; }
       tlo.remove();
       odswiezStan();
     };
@@ -411,6 +457,29 @@ function obsluzBlad(e, w) {
   renderuj();
 }
 
+/* r25: błąd akcji wywołanej Z MODALA — alert() przebija się przez
+ * otwarte okno modalne (dymek „Ponów" rysuje się na liście POD modalem
+ * i jest niewidoczny — stąd u właściciela „nic się nie dzieje").
+ * Błędy sesji (BLAD_TOKENA / BRAK_DOSTEPU / ARKUSZ_BRAK) to zmiana
+ * ekranu, nie komunikat — te kierujemy przez obsluzBlad jak dotąd. */
+function bladModalny(w) {
+  var blad = w && w.blad;
+  if (blad === 'BLAD_TOKENA' || blad === 'BRAK_DOSTEPU' || blad === 'ARKUSZ_BRAK') {
+    obsluzBlad(null, w);
+    return;
+  }
+  if (blad === 'NIEZNANA_AKCJA') {
+    alert('To działanie jest jeszcze nieznane dla silnika po stronie Google.' +
+      (S.stan && S.stan.wersja ? '\nSerwer arkusza: ' + S.stan.wersja : '') +
+      '\nStrona: ' + WERSJA_UI + '.' +
+      '\n\nNajczęstsza przyczyna: strona jest już nowa, ale właściciel nie wgrał jeszcze nowego kodu do Apps Script.' +
+      '\nInstrukcja: script.google.com → projekt Dziennika → zaznacz cały kod (Ctrl+A) → wklej nowy plik → zapisz (Ctrl+S) → Wdróż → Zarządzaj wdrożeniami → ✎ → Nowa wersja → Wdróż.' +
+      '\nPotem odśwież stronę i spróbuj ponownie.');
+    return;
+  }
+  alert('Operacja nie powiodła się: ' + ((w && w.opis) || blad || 'nieznany błąd') + '. Spróbuj ponownie.');
+}
+
 /* ------------------------------------------------ widok: członkowie */
 function renderujCzlonkow(app) {
   var sortImie = S.sortowanie !== 'nazwisko';
@@ -432,6 +501,7 @@ function renderujCzlonkow(app) {
       '<div class="rzad2"><input class="szukaj" id="szukaj-czlonkowie" type="search" placeholder="Szukaj…" value="' + esc(S.szukane) + '"></div>' +
     '</div>' +
     '<div class="lista" style="display:block;max-width:720px">' +
+      banerWersji() +
       wszyscy.filter(function (z) {
         if (!S.szukane) return true;
         var sz = S.szukane.toLowerCase();
@@ -453,7 +523,7 @@ function renderujCzlonkow(app) {
       (S.bladAkcji ? '<p class="oplucie" style="color:var(--blad)">Ostatnia operacja się nie powiodła: ' + esc(S.bladAkcji) + ' — spróbuj ponownie.</p>' : '') +
     '</div>' +
     '<div class="stopka">' +
-      '<p class="wersja">' + esc(S.stan.email) + ' · ' + WERSJA_UI + '</p>' +
+      '<p class="wersja">' + esc(S.stan.email) + ' · strona ' + WERSJA_UI + ' · serwer ' + esc(S.stan.wersja || '?') + '</p>' +
       '<div class="wiersz">' +
         '<button id="stopka-obecnosc">📋 Obecność</button>' +
         '<button class="on" id="stopka-czlonkowie">👥 Członkowie</button>' +
@@ -500,7 +570,7 @@ function modalImportu() {
     wywolaj('importujUczestnikow', { token: TOKEN, tekst: tekst }, function (e, w) {
       tlo.remove();
       if (e) { alert('Błąd importu: ' + e.message); return; }
-      if (!w.ok) { obsluzBlad(null, w); return; }
+      if (!w.ok) { bladModalny(w); return; }
       var raport = 'Dodano: ' + w.dodano + ' · pominięto (już są): ' + w.pominieto;
       if (w.bledy && w.bledy.length) {
         raport += '\n\nWiersze z problemami (popraw i wklej ponownie tylko te):\n' + w.bledy.join('\n');
@@ -572,7 +642,7 @@ function modalDodajEdytuj(z) {
     var zakoncz = function (e, w) {
       tlo.remove();
       if (e) { alert('Błąd zapisu: ' + e.message); return; }
-      if (!w.ok) { obsluzBlad(null, w); return; }
+      if (!w.ok) { bladModalny(w); return; }
       odswiezStan();
     };
     if (z) wywolaj('edytujCzlonka', { token: TOKEN, id: z.id, imie: imie, nazwisko: nazwisko, grupa: grupa, ur: ur }, zakoncz);
