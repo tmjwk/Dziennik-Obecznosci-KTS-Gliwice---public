@@ -1,5 +1,5 @@
 /* =================================================================
- * Dziennik Obecności KTS Gliwice — frontend v0.2.9
+ * Dziennik Obecności KTS Gliwice — frontend v0.4.0
  * Przepływ (instrukcja właściciela, runda 17):
  *   1) użytkownik wchodzi na https://tmjwk.github.io/Dziennik-Obecznosci-
  *      KTS-Gliwice---public/ (strona hostowana na GitHub Pages),
@@ -98,11 +98,48 @@
  *    nie zdążyła się wykonać); gdy arkusz wróci, dajStan sukcesem
  *    drenuje kolejkę. BRAK_DOSTEPU (zdjęcie z białej listy) nadal
  *    czyści — konto bez dostępu nie może mutować arkusza.
+ *
+ * r32 („przycisk obecności ma mieć STANY — nie da się kliknąć w trakcie
+ * wysyłania"): model PESYMISTYCZNY per kafel, ustalony teoretycznie
+ * z właścicielem w rundzie 32. Zasada: JEDNO TAPNIĘCIE = JEDNA pełna,
+ * nieprzerywalna transakcja; kafel pokazuje wyłącznie PRAWDĘ Z ARKUSZA
+ * (✓ dopiero po potwierdzeniu serwera). Do v0.3.0 kafel był
+ * optymistyczny (zielony od razu po tapnięciu), a tapnięcie „w locie"
+ * koalesowało — szybkie stuk-stuk-stuk potrafiło zmienić intencję
+ * zapisu na usunięcie. Teraz:
+ *  - NIEOBECNY (domyślny) → 1 tap → W LOCIE (blokada: przycisk
+ *    nieczuły, „…", pulsowanie) → potwierdzenie arkusza → OBECNY (✓).
+ *  - OBECNY → tapy 1/3 i 2/3 (licznik LOKALNY, bez rundy do serwera —
+ *    serwer nie ma czego zapisywać dla licznika) → tap 3/3 → W LOCIE
+ *    (blokada) → potwierdzenie → NIEOBECNY (pełny cykl wraca do stanu
+ *    początkowego — ustalenie z r32).
+ *  - Tap w kafel W LOCIE = IGNOROWANY (blokada logiczna w obsłudze
+ *    zdarzenia, nie tylko atrybut disabled — zdarzenia przychodzą też
+ *    z klawiatury czy podwójnego triggera touch+click). Kafel INNEJ
+ *    osoby działa normalnie (blokada per-osoba: tapnięcie Kowalskiego
+ *    nie modyfikuje danych Nowakowej).
+ *  - Kolejka FIFO (r30/r31) zostaje: pauza sesji, localStorage,
+ *    dedup backendu — ale jej wizualizacja to NIE zmiana koloru kafla,
+ *    tylko kropka „w kolejce" (⏳). Koniec z przywrocOptymizmKolejki()
+ *    i nakładaniem intencji na świeży stan (uproszczenie merge'u:
+ *    obecności dnia z odpowiedzi mutacji podstawiamy wprost).
+ *  - Kafel czekający w kolejce (offline) pozostaje KLIKALNY:
+ *    koalescing działa dalej dla wpisów NIEWYSŁANYCH (zmiana zdania
+ *    zanim wystartowała transmisja — jedno żądanie zamiast dwóch),
+ *    a licznik 3-tapów resetuje się po 2 s (jak w v0.3.0).
+ *  - BŁĄD (sieć/biznesowy): kafel wraca do stanu sprzed intencji,
+ *    czerwony błysk „!", dymek „Ponów" na liście — kolejka leci dalej.
+ *  - TIMEOUT ~12 s żądania: najdłuższe realne wykonanie Apps Script
+ *    to kilka sekund; wiszące połączenie (TCP bez odpowiedzi) nie może
+ *    blokować kafla na zawsze — żądanie domyślnie trafia do kolejki
+ *    (dedup backendu sprawia, że późniejsze ponowienie jest bezpieczne).
+ *    F5 podczas blokady: wpis w Locie NIE jest w kolejce → po powrocie
+ *    kafel ma stan z arkusza (serwer wygrywa, duplikat niemożliwy).
  * ================================================================= */
 
 'use strict';
 
-var WERSJA_UI = 'v0.3.0';
+var WERSJA_UI = 'v0.4.0';
 
 /* r25: najstarsza wersja API (Apps Script), z jaką ta strona umie
  * współpracować. v0.2.4 = akcje grup (dodajGrupe/edytujGrupe/usunGrupe);
@@ -278,7 +315,13 @@ var S = {
   trybCzlonkowie: false, // czy otwarty widok członków
   tapy: {},              // { idZawodnika: {n: liczba tapów, t: timestamp} }
   timery: {},            // timery resetu tapów per zawodnik
-  wisiace: {}            // { idZawodnika: 'zapis'|'usun'|'blad' } — wyliczane
+  wisiace: {}            // { idZawodnika: 'zapis'|'usun' } — wyliczane
+  /* r32: { idZawodnika: timestamp } — kafel, którego OSTATNIA operacja
+   * padła (sieć/biznesowy). KafelHtml pokazuje „!" przez BLYK_BLEDU_MS
+   * od tego momentu, potem znika (render po timerze). Kafel pozostaje
+   * w stanie z arkusza — błysk to tylko sygnał „coś nie wyszło, patrz
+   * dymek Ponów". */
+  , bledyKafli: {}
   /* r30: kolejka FIFO obecności (ustalenie B z rundy 30). Intencje lecą
    * do serwera PO JEDNEJ (jedna w locie), w kolejności tapnięć — koniec
    * z równoległymi żądaniami, które serwer i tak serializuje LockService'm
@@ -370,20 +413,15 @@ function odczytajKolejke() {
   }
 }
 
-/** Nanosi optymizm kolejki na AKTUALNY stan (idempotentne zbiory id):
- * kafelki czekających intencji pokazują docelowe znaczenie od razu,
- * choć serwer ich jeszcze nie potwierdził. Wywoływane po KAŻDYM
- * podstawieniu S.stan (dajStan, przyjmijStan) — inaczej świeży stan
- * „cofnąłby" wizualnie czekające kliknięcia. */
-function przywrocOptymizmKolejki() {
-  if (!S.stan || !S.stan.obecnosci || !S.kolejka.length) return;
-  S.kolejka.forEach(function (w) {
-    var dzien = S.stan.obecnosci[w.data] || (S.stan.obecnosci[w.data] = []);
-    var i = dzien.indexOf(w.id);
-    if (w.akcja === 'zapiszObecnosc' && i === -1) dzien.push(w.id);
-    if (w.akcja === 'usunObecnosc' && i !== -1) dzien.splice(i, 1);
-  });
-}
+/* r32: KONIEC optymizmu kolejki. Do v0.3.0 funkcja
+ * przywrocOptymizmKolejki() nanosiła czekające intencje na świeży stan
+ * (kafel „już zielony" przed potwierdzeniem). W modelu pesymistycznym
+ * r32 kafel pokazuje WYŁĄCZNIE prawdę z arkusza: S.stan.obecnosci
+ * podstawiamy wprost (dajStan / stan z odpowiedzi mutacji), a intencje
+ * czekające w kolejce wizualizuje osobno kropka „w kolejce" (kafelHtml
+ * czyta S.wisiace). Merge upraszcza się z „nakładania intencji na
+ * odpowiedź" do prostego podstawienia dnia — mniej miejsc, gdzie stan
+ * lokalny mógł rozjechać się z arkuszem. */
 
 /* ------------------------------------------------ pomocnicze */
 function lokalnaData(d) {
@@ -617,26 +655,42 @@ function widoczni() {
   return lista;
 }
 
-/* kafel zawodnika — stan wizualny zależny od tapów i synchronizacji */
+/* kafel zawodnika — r32: maszyna stanów per kafel (model pesymistyczny).
+ * KLASA BAZOWA = prawda arkusza („obecny" — zielony ✓ z potwierdzenia),
+ * NAKŁADKI transportowe idą OBOK bazy, nie zamiast niej:
+ *  - W LOCIE (S.wLocie tej osoby) = BLOKADA: disabled, „…"/„⟲", puls,
+ *    wygaszenie — nieczuły na tapnięcia. Zielony kafel w locie ZOSTAJE
+ *    zielony (jest obecny w arkuszu!) — pulsem sygnalizujemy pracę;
+ *  - W KOLEJCE (intencja czeka: pauza sesji/arkusza) = kropka „…",
+ *    kafel KLIKALNY (zmiana zdania = koalescing czekającego wpisu);
+ *  - BŁĄD świeży (S.bledyKafli) = czerwony błysk „!" (wygasa po 3 s);
+ *  - licznik 2/3 = pomarańczowy „2/3" (tap 1 licznika jest niemy —
+ *    jak w v0.3.0, żeby nie migać przy każdym niepotwierdzonym tapnięciu). */
+var BLYK_BLEDU_MS = 3000;
+
 function kafelHtml(z) {
   var dzien = S.stan.obecnosci[S.data] || [];
   var obecny = dzien.indexOf(z.id) !== -1;
   var tap = S.tapy[z.id];
   var wisi = S.wisiace[z.id];
+  var tenWLocie = !!(S.wLocie && S.wLocie.id === z.id);
+  var bladNiedawno = !!(S.bledyKafli[z.id] && Date.now() - S.bledyKafli[z.id] < BLYK_BLEDU_MS);
   var klasy = 'kafel';
-  if (wisi === 'blad') klasy += ' blad';
+  if (obecny) klasy += ' obecny'; // baza: prawda arkusza
+  if (tenWLocie) klasy += ' wlocie' + (S.wLocie.akcja === 'usunObecnosc' ? ' wlocie-usun' : '');
+  else if (bladNiedawno) klasy += ' blad';
   else if (tap && tap.n >= 2) klasy += ' potwierdz';
   else if (wisi) klasy += ' synchronizacja';
-  else if (obecny) klasy += ' obecny';
 
-  var status = '<span class="status">✓</span>';
-  if (wisi === 'zapis') status = '<span class="status">…</span>';
-  else if (wisi === 'usun') status = '<span class="status usun">…</span>';
-  else if (wisi === 'blad') status = '<span class="status">!</span>';
-  else if (tap && tap.n >= 2) status = '<span class="status usun">×' + tap.n + '</span>';
+  var status = '<span class="status"></span>';
+  if (tenWLocie) status = '<span class="status">' + (S.wLocie.akcja === 'usunObecnosc' ? '⟲' : '…') + '</span>';
+  else if (bladNiedawno) status = '<span class="status">!</span>';
+  else if (tap && tap.n >= 2) status = '<span class="status usun">' + tap.n + '/3</span>';
+  else if (wisi) status = '<span class="status">…</span>';
   else if (obecny) status = '<span class="status">✓</span>';
 
-  return '<button class="' + klasy + '" data-id="' + esc(z.id) + '">' +
+  return '<button class="' + klasy + '" data-id="' + esc(z.id) + '"' +
+    (tenWLocie ? ' disabled' : '') + '>' +
     '<span class="wiersz-nazwy"><span class="nazwa"><b>' +
     (S.sortowanie === 'nazwisko'
       ? esc(z.nazwisko + ' ' + z.imie)
@@ -646,26 +700,49 @@ function kafelHtml(z) {
     '</button>';
 }
 
-/* tap w kafel: nieobecny → zapis; obecny → licznik do 3 → usunięcie.
- * r30: intencje NIE strzelają do serwera od razu — trafiają do kolejki
- * FIFO (wysylaKolejke poniżej). Kafel i tak jest optymistyczny (stan
- * lokalny zmienia się natychmiast), pełne „✓" przychodzi po potwierdzeniu
- * serwera — dokładnie jak ustaliliśmy: pewność dotarcia kliknięcia
- * do arkusza, tylko bez wyścigów równoległych żądań. */
+/* tap w kafel — r32: model pesymistyczny („stany przycisku", ustalenie
+ * z rundy 32). JEDNO TAPNIĘCIE = JEDNA pełna transakcja z potwierdzeniem
+ * arkusza; kolejna transakcja tej samej osoby startuje dopiero po
+ * rozliczeniu poprzedniej. NIEOBECNY: 1 tap → zapis → (blokada w locie)
+ * → ✓ po potwierdzeniu. OBECNY: tapy 1/3 i 2/3 to licznik LOKALNY (serwer
+ * nie ma czego zapisywać dla licznika — zero zbędnych rund), tap 3/3 →
+ * usunięcie → (blokada) → powrót do NIEOBECNY (stan początkowy, pełny
+ * cykl). Szybkie stuk-stuk-stuk na nieobecnym da JEDEN zapis (dwa
+ * pozostałe tapy zignorowane w blokadzie) — dokładnie zamierzone.
+ * Kafel czekający w KOLEJCE (pauza sesji/arkusza, wpisy niewysłane)
+ * pozostaje klikalny: zmiana zdania offline = koalescing czekającego
+ * wpisu (jedno żądanie zamiast dwóch). */
 function tapZawodnika(z) {
   var dzien = S.stan.obecnosci[S.data] || [];
 
-  if (dzien.indexOf(z.id) === -1) {
-    // nieobecny → zapis
-    dzien.push(z.id);
-    S.stan.obecnosci[S.data] = dzien;
+  // r32: BLOKADA LOGICZNA — wpis tej osoby jest W LOCIE → tap ignorowany.
+  // To zabezpieczenie w samej obsłudze zdarzenia (disabled w HTML to
+  // tylko prezentacja: zdarzenia potrafią przyjść z klawiatury czy z
+  // podwójnego triggera touch+click). Inne kafle nie są blokowane.
+  if (S.wLocie && S.wLocie.id === z.id) return;
+
+  // r32: KOLOR kafla = prawda arkusza, ale SEMANTYKA tapnięcia liczy
+  // się z czekającą intencją (projekcja stanu po drenażu kolejki):
+  // „obecny + czekający usun" ma się tapnąć jak NIEOBECNY (tap = zapis
+  // = odwołanie usunięcia), bo gdyby kolejka padła z sieci, intencją
+  // użytkownika było jego usunięcie i zmiana zdania musi to odwrócić.
+  // Bez tego nie dałoby się anulować czekającego usun (3 tapy znów
+  // zakolejkowałyby usun zamiast przywrócić zapis).
+  var wKolejce = null;
+  S.kolejka.forEach(function (w) { if (w.id === z.id) wKolejce = w; });
+  var efektywnieObecny = dzien.indexOf(z.id) !== -1;
+  if (wKolejce) efektywnieObecny = (wKolejce.akcja === 'zapiszObecnosc');
+
+  if (!efektywnieObecny) {
+    // nieobecny (po drenażu) → zapis; r32: BEZ zmiany lokalnego
+    // obecnosci — kolor ✓ przyjdzie z potwierdzeniem serwera
     zakolejkuj(z.id, 'zapiszObecnosc');
     renderuj();
     wysylaKolejke();
     return;
   }
 
-  // obecny → licznik tapów do 3
+  // obecny (potwierdzony albo z czekającym zapisem) → licznik do 3
   var tap = S.tapy[z.id] || { n: 0, t: 0 };
   tap.n += 1;
   tap.t = Date.now();
@@ -681,13 +758,11 @@ function tapZawodnika(z) {
     return;
   }
 
-  // 3 tapy → usuń
+  // 3 tapy → usuń; r32: bez optymistycznego splice — kafel jest obecny
+  // do potwierdzenia usunięcia z arkusza
   delete S.tapy[z.id];
   clearTimeout(S.timery[z.id]);
   delete S.timery[z.id];
-  var idx = dzien.indexOf(z.id);
-  if (idx !== -1) dzien.splice(idx, 1);
-  S.stan.obecnosci[S.data] = dzien;
   zakolejkuj(z.id, 'usunObecnosc');
   renderuj();
   wysylaKolejke();
@@ -732,12 +807,24 @@ function zsynchronizujWisiace() {
   if (nakladka) odswiezLicznikNakladki(nakladka);
 }
 
+/* r32: timeout jednej operacji obecności. Realne wykonanie Apps Script
+ * (lock + weryfikacja tokena z cache + skan 300 + zapis) to 1–3 s;
+ * wiszące połączenie (TCP bez odpowiedzi, aplikacja uśpiona) nie może
+ * blokować kafla na zawsze. Po upływie traktujemy operację jak błąd
+ * POŁĄCZENIA (nie wiemy, czy serwer zapisał): wpis wraca do kolejki,
+ * kafel wraca do prawdy arkusza, pętla ponawia (zapisy idempotentne —
+ * dedup backendu pochłonie duplikat, gdyby pierwsze jednak doszło).
+ * Timer jest czyszczony przy KAŻDYM rozliczeniu odpowiedzi. */
+var TIMEOUT_W_LOCIE = 12000; // ms
+
 /* Pętla wysyłania: jedna operacja w locie, reszta czeka. Wywoływana po
  * każdej zmianie kolejki i po rozliczeniu odpowiedzi. r31: pauza
  * (S.pauza = 'sesja' po BLAD_TOKENA, 'arkusz' po ARKUSZ_BRAK) wstrzymuje
  * PĘTLĘ WYSYŁKI, ale nie obsługę UI — tapnięcia podczas pauzy dokładają
  * się do kolejki (kropki + licznik nakładki żyją przez zsynchronizujWisiace
- * z zakolejkuj/tapZawodnika). */
+ * z zakolejkuj/tapZawodnika). r32: dodatkowo timer TIMEOUT_W_LOCIE —
+ * brak odpowiedzi w 12 s = rozliczenie jak błąd sieci (wpis wraca do
+ * kolejki; F5 wtedy zostawia wpis w Locie poza kolejką = stan z arkusza). */
 function wysylaKolejke() {
   if (S.pauza) {
     // pauza: tapnięcie doszło do kolejki — pokaż kropkę „w kolejce"
@@ -751,8 +838,28 @@ function wysylaKolejke() {
   var wpis = S.kolejka.shift();
   S.wLocie = wpis;
   zsynchronizujWisiace();
+  renderuj(); // r32: kafel tej osoby przechodzi w stan blokady („…" + puls)
   var dataWyslania = wpis.data || S.data; // r31: data z CHWILI TAPNIĘCIA
+  var rozliczone = false;
+  var timer = setTimeout(function () {
+    if (rozliczone) return;
+    rozliczone = true;
+    // TIMEOUT: nie wiemy, czy serwer zapisał — jak błąd sieci, ale
+    // CICHE: wpis wraca na czoło kolejki (dedup chroni przed duplikatem),
+    // kafel wraca do kropki „w kolejce", pętla sama ponawia po chwili.
+    // Dymek „Ponów" pojawi się dopiero, gdy ponowienie PADNIE z błędem
+    // sieci (wtedy to już prawdziwy błąd do pokazania).
+    S.wLocie = null;
+    S.kolejka.unshift(wpis);
+    zapiszKolejke();
+    zsynchronizujWisiace();
+    renderuj();
+    setTimeout(wysylaKolejke, 800); // krótka pauza przed ponowieniem
+  }, TIMEOUT_W_LOCIE);
   wywolaj(wpis.akcja, { token: TOKEN, id: wpis.id, data: dataWyslania }, function (e, w) {
+    if (rozliczone) return; // timeout nas ubiegł — ta odpowiedź jest martwa
+    rozliczone = true;
+    clearTimeout(timer);
     S.wLocie = null;
 
     // r31: sesja wygasła W TRAKCIE kolejki → NIE wylogowujemy i NIE
@@ -794,13 +901,13 @@ function wysylaKolejke() {
     }
 
     // błąd POŁĄCZENIA (sieć padła): nie wiemy, czy serwer zapisał.
-    // Revert optymistycznego znaczenia tego kafla (serwer wygrywa),
+    // r32: kafel wraca do prawdy arkusza (nie było optymizmu do cofania),
     // dymek „Ponów", kolejka leci dalej. r31: wpis jest rozliczony
-    // (revert widoczny dla usera) → LS musi się zgodzić z pamięcią;
-    // jedyny świadomy „zaleg" w LS to wpis W LOCIE (patrz shift wyżej
-    // — bez zapisu po zdjęciu z kolejki: F5 w locie = ponowienie).
+    // (widoczne dla usera) → LS musi się zgodzić z pamięcią; jedyny
+    // świadomy „zaleg" w LS to wpis W LOCIE (patrz shift wyżej — bez
+    // zapisu po zdjęciu z kolejki: F5 w locie = ponowienie).
     if (e) {
-      cofnijOptymizm(wpis, dataWyslania);
+      domknijKafelPoBledzie(wpis.id);
       zapiszKolejke();
       S.bladAkcji = e.message;
       zsynchronizujWisiace();
@@ -810,8 +917,9 @@ function wysylaKolejke() {
     }
 
     if (!w.ok) {
-      // błąd biznesowy tej operacji: revert kafla + dymek; reszta leci.
-      cofnijOptymizm(wpis, dataWyslania);
+      // błąd biznesowy tej operacji: kafel do prawdy arkusza + dymek;
+      // reszta leci.
+      domknijKafelPoBledzie(wpis.id);
       zapiszKolejke(); // r31: jw. — rozliczony wpis znika i z LS
       S.bladAkcji = (w && w.opis) || w.blad || 'Nieznany błąd';
       zsynchronizujWisiace();
@@ -820,46 +928,56 @@ function wysylaKolejke() {
       return;
     }
 
-    // SUKCES: rozliczamy per-zawodnik — bierzemy obecności dnia z odpowiedzi
-    // (serwer v0.2.6+ dokleja stan SPÓJNY z tą operacją). NIE podstawiamy
-    // całego stanu, a dnia nie kopiujemy wprost: intencje czekające w kolejce
-    // serwer jeszcze nie zna (odpowiedź NIE może cofnąć ich optymistycznych
-    // znaczeń) — rozliczamy je po ich własnej intencji. Ktoś inny mógł
-    // zapisać się w międzyczasie — jego wpis z odpowiedzi zostaje.
-    // r31: intencje w kolejce mogą dotyczyć INNEJ daty niż ta, która
-    // właśnie wróciła (zmiana daty mid-drain) — merge per data wpisu.
+    // SUKCES: r32 — uproszczony merge. Serwer v0.2.6+ dokleja stan SPÓJNY
+    // z tą operacją; obecności dnia podstawiamy WPROST z odpowiedzi
+    // (prawda arkusza). Koniec z nakładaniem czekających intencji na
+    // odpowiedź — kafel i tak nie opiera się na optymistycznych
+    // znaczeniach, a intencje czekające w kolejce drenują się po kolei
+    // i po ich własnych odpowiedziach pojawi się ich kolor. Ktoś inny
+    // mógł zapisać się w międzyczasie — jego wpis z odpowiedzi zostaje.
+    var padlStarySerwer = false;
     if (w && w.stan && w.stan.obecnosci && w.stan.obecnosci[dataWyslania] && !w.stan.brakDostepu) {
-      var nowy = w.stan.obecnosci[dataWyslania].slice();
-      S.kolejka.forEach(function (wp) {
-        if (wp.data !== dataWyslania) return; // tylko intencje tego dnia
-        var i = nowy.indexOf(wp.id);
-        if (wp.akcja === 'zapiszObecnosc' && i === -1) nowy.push(wp.id);
-        if (wp.akcja === 'usunObecnosc' && i !== -1) nowy.splice(i, 1);
-      });
-      S.stan.obecnosci[dataWyslania] = nowy;
+      S.stan.obecnosci[dataWyslania] = w.stan.obecnosci[dataWyslania];
     } else {
-      // serwer starszy niż v0.2.6 (bez stanu w odpowiedzi): zostawiamy
-      // znaczenie optymistyczne — potwierdzi je najbliższy dajStan;
-      // spójność pełna wróci przy F5/odświeżeniu.
+      // serwer starszy niż v0.2.6 (bez stanu w odpowiedzi): kafel NIE
+      // robi się zielony lokalnie (model pesymistyczny) — ✓ dowiezie
+      // dajStan po zakończeniu drenażu (patrz niżej; per-operacyjny
+      // dajStan w środku pętli mieszałby się z wysyłką)
+      padlStarySerwer = true;
     }
     zapiszKolejke(); // r31: kolejka się skróciła — trzymamy localStorage w zgodzie
     zsynchronizujWisiace();
     renderuj();
-    wysylaKolejke(); // następna operacja z kolejki
+    if (!S.kolejka.length && padlStarySerwer) {
+      // drenaż zakończony, a ostatnia odpowiedź nie niosła stanu →
+      // jeden dajStan domyka kolory kafli (rare: serwer < v0.2.6)
+      odswiezStan();
+    } else {
+      wysylaKolejke(); // następna operacja z kolejki
+    }
   });
 }
 
-/* Revert optymistycznego znaczenia kafla po błędzie: wracamy do stanu
- * sprzed tapnięcia = odwrotność intencji operacji (zapis padł → nie
- * był obecny; usunięcie padło → znów obecny). Serwer wygrywa. */
-function cofnijOptymizm(wpis, data) {
-  var dzien = S.stan.obecnosci[data] || [];
-  var idx = dzien.indexOf(wpis.id);
-  if (wpis.akcja === 'zapiszObecnosc' && idx !== -1) dzien.splice(idx, 1);
-  if (wpis.akcja === 'usunObecnosc' && idx === -1) dzien.push(wpis.id);
-  S.stan.obecnosci[data] = dzien;
-  delete S.tapy[wpis.id]; // licznik 3-tapów nie ma już sensu
-  if (S.timery[wpis.id]) { clearTimeout(S.timery[wpis.id]); delete S.timery[wpis.id]; }
+/* r32: po błędzie operacji czyścimy licznik tapów i znacznik błędu
+ * kafla — kafel wraca do PRAWDY ARKUSZA (S.stan.obecnosci), którą
+ * ustawia wyłącznie odpowiedź serwera. W optymistycznym v0.3.0 trzeba
+ * było tu odwracać lokalne znaczenie (cofnijOptymizm) — teraz stan
+ * lokalny nigdy nie odjeżdża od arkusza, więc wystarcza domknięcie
+ * UI: oznacz „!" (błysk wygasa sam po BLYK_BLEDU_MS), zdejmij licznik,
+ * pokaż dymek (ustawia wywołujący). */
+function domknijKafelPoBledzie(id) {
+  delete S.tapy[id]; // licznik 3-tapów nie ma już sensu
+  delete S.wisiace[id];
+  if (S.timery[id]) { clearTimeout(S.timery[id]); delete S.timery[id]; }
+  S.bledyKafli[id] = Date.now();
+  setTimeout(function () {
+    // wygaszenie błysku „!" — render tylko gdy wpis jeszcze tam jest
+    // (user mógł w międzyczasie zmienić zdanie i mieć nową intencję)
+    if (S.bledyKafli[id] && Date.now() - S.bledyKafli[id] >= BLYK_BLEDU_MS - 50) {
+      delete S.bledyKafli[id];
+      if (S.stan && S.stan.obecnosci) renderuj();
+    }
+  }, BLYK_BLEDU_MS + 60);
 }
 
 /* r31: nakładka „Sesja wygasła" — NIE przełączamy ekranu (lista z kropkami
@@ -1223,10 +1341,11 @@ function przyjmijStan(w, modyfikator, potwierdz) {
   // fast-path: serwer v0.2.6+ sam przysłał stan mutacji
   if (w && w.stan && !w.stan.brakDostepu) {
     S.stan = w.stan;
-    // r31: mutacja (np. dodajGrupe) przynosi stan, który NIE zna jeszcze
-    // intencji obecności czekających w kolejce — przywracamy optymizm,
-    // żeby czekające kafelki nie „mrugały" na zielono-czerwono
-    przywrocOptymizmKolejki();
+    // r32: stan wprost z odpowiedzi — obecności = prawda arkusza
+    // (optymizm kolejki już nie istnieje; czekające intencje i tak
+    // wizualizuje kropka z S.wisiace). Uwaga: stan z mutacji GRUP nie
+    // zna intencji obecności — ale to bez znaczenia, bo kafel nie
+    // opiera się już na „naniesionych" intencjach.
     if (!S.data) S.data = w.stan.dzisiaj || lokalnaData(new Date());
     renderuj();
     return;
@@ -1299,15 +1418,14 @@ function odswiezStan(cb, proby, potwierdz) {
     S.stan = w;
     // r31: pierwszy udany stan = moment na kolejkę z localStorage (F5
     // w trakcie wysyłki). Udany dajStan dowodzi, że token ŻYJE i arkusz
-    // ODPOWIADA — więc obie pauzy ('sesja' i 'arkusz') schodzą, a optymizm
-    // kolejki wraca NA ŚWIEŻYM stanie (bez tego dajStan „cofnąłby"
-    // czekające kafelki). I rusza pętla wysyłki.
+    // ODPOWIADA — więc obie pauzy ('sesja' i 'arkusz') schodzą.
+    // r32: bez optymizmu — kafel pokaże prawdę arkusza, intencje
+    // czekające w kolejce drenują się w tle (kropki z S.wisiace).
     if (!KOLEJKA_WCZYTANA) {
       odczytajKolejke();
       KOLEJKA_WCZYTANA = true;
     }
     S.pauza = null;
-    przywrocOptymizmKolejki();
     if (!S.data) S.data = w.dzisiaj || lokalnaData(new Date());
     if (!S.sortowanie) S.sortowanie = (w.ustawienia && w.ustawienia.SORTOWANIE_DOMYSLNE) || 'imie';
     var zapisane = null;

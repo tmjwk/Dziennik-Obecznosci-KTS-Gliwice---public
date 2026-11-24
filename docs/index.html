@@ -153,6 +153,40 @@
     .kafel.synchronizacja .status { border-style: dashed; }
     .kafel.blad { border-width: 2px; }
 
+    /* ---------- r32: maszyna stanów kafla (model pesymistyczny) ----------
+     * W LOCIE = blokada transakcji: kafel nieczuły (disabled), wygaszony,
+     * status pulsuje (użytkownik widzi „pracuję", a nie „zawieszony").
+     * W KOLEJCE = kropka przerywana, kafel klikalny (zmiana zdania).
+     * BŁĄD = czerwony błysk statusu (wygasa sam, patrz BLYK_BLEDU_MS). */
+    .kafel.wlocie {
+      opacity: .55; cursor: wait; pointer-events: none;
+      animation: kafel-puls 1.1s ease-in-out infinite;
+    }
+    .kafel.wlocie .status {
+      border-color: var(--akcent); color: var(--akcent);
+      animation: status-puls 1.1s ease-in-out infinite;
+    }
+    .kafel.wlocie-usun .status { border-color: var(--ostrz); color: var(--ostrz); }
+    /* obecny+wlocie: kafel ZOSTAJE zielony (prawda arkusza), puls i
+     * wygaszenie sygnalizują blokadę — kolejność reguł ma znaczenie */
+    .kafel.wlocie.obecny { background: #e7f4ee; border-color: var(--obecny); }
+    @keyframes kafel-puls {
+      0%, 100% { opacity: .55; }
+      50% { opacity: .8; }
+    }
+    @keyframes status-puls {
+      0%, 100% { transform: scale(1); }
+      50% { transform: scale(1.18); }
+    }
+    /* redukcja ruchu (a11y): puls dla ruchliwo jest zbędny */
+    @media (prefers-reduced-motion: reduce) {
+      .kafel.wlocie, .kafel.wlocie .status { animation: none; }
+    }
+    .kafel.blad .status {
+      background: var(--blad); border-color: var(--blad); color: #fff;
+    }
+    .kafel.blad { border-color: var(--blad); background: #fdecea; }
+
     /* ---------- dymek „Ponów" ---------- */
     .ponow {
       grid-column: 1 / -1;
