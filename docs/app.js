@@ -135,11 +135,28 @@
  *    (dedup backendu sprawia, że późniejsze ponowienie jest bezpieczne).
  *    F5 podczas blokady: wpis w Locie NIE jest w kolejce → po powrocie
  *    kafel ma stan z arkusza (serwer wygrywa, duplikat niemożliwy).
+ *
+ * r33 („tapuję drugi przycisk — zero reakcji, dopóki pierwszy się nie
+ * wyśle; nie wiem, czy tap w ogóle zarejestrowany"): logika kolejki FIFO
+ * (r30) była poprawna, ale jej WIZUALIZACJA zawodziła na dwóch poziomach:
+ *  1) mapa S.wisiace (kafle czekające w kolejce) aktualizowała się tylko
+ *     w pętli wysyłki — a ta przy wpisie W LOCIE wychodzi wcześnie
+ *     (if (S.wLocie) return), więc tapnięcie KOLEJNEJ osoby lądowało
+ *     w kolejce BEZ kropki aż do rozliczenia poprzedniej operacji.
+ *     Fix: zakolejkuj() syncuje mapę natychmiast → renderuj() w
+ *     tapZawodnika rysuje kropkę w tym samym ticku co zdarzenie.
+ *  2) kropka „…" kafla czekającego była NIEWIDOCZNA — .status dziedziczy
+ *     color:transparent (bazowy krąg placeholder), a reguła
+ *     .synchronizacja zmieniała tylko styl ramki. Fix (CSS): przerywana
+ *     ramka i „…" w kolorze akcentu + jasne tło.
+ * Transmisja nadal PO JEDNEJ (LockService na serwerze), ale każdy tap
+ * ma natychmiastową reakcję: kropka = „przyjęte, czeka w kolejce",
+ * pulsujący kafel = „leci właśnie", ✓ = „arkusz potwierdził".
  * ================================================================= */
 
 'use strict';
 
-var WERSJA_UI = 'v0.4.0';
+var WERSJA_UI = 'v0.4.1';
 
 /* r25: najstarsza wersja API (Apps Script), z jaką ta strona umie
  * współpracować. v0.2.4 = akcje grup (dodajGrupe/edytujGrupe/usunGrupe);
@@ -778,21 +795,32 @@ function tapZawodnika(z) {
  * wg odpowiedzi). r31: wpis wie, pod jaką datą tapnięto (S.data z chwili
  * tapnięcia), a zmiana jest od razu w localStorage. */
 function zakolejkuj(id, akcja) {
+  var podmieniony = false;
   for (var i = 0; i < S.kolejka.length; i++) {
     if (S.kolejka[i].id === id) {
       S.kolejka[i].akcja = akcja;
       S.kolejka[i].data = S.data;
-      zapiszKolejke();
-      return;
+      podmieniony = true;
+      break;
     }
   }
-  S.kolejka.push({ id: id, akcja: akcja, data: S.data });
+  if (!podmieniony) S.kolejka.push({ id: id, akcja: akcja, data: S.data });
   zapiszKolejke();
+  /* r33: mapa kafli czekających od RAZU — kropka „w kolejce" rysuje się
+   * w tym samym ticku co tapnięcie (renderuj zaraz po zakolejkuj w
+   * tapZawodnika), nawet gdy inny wpis jest W LOCIE (pętla wysyłki
+   * wtedy wychodzi wcześnie i do v0.4.0 nie syncowała mapy — kafel
+   * drugiej osoby był „niemy" aż do rozliczenia pierwszej). */
+  zsynchronizujWisiace();
 }
 
 /* Utrzymuje S.wisiace zgodne z kolejką+wLocie (kafelHtml czyta to pole).
- * Kafel „w locie" ma własny status (kropki), wpisy czekające — też
- * (renderuj i tak przerysowuje po każdej rozliczonej operacji). */
+ * Kafel „w locie" ma własny status (kropki), wpisy czekające — też.
+ * r33: syncuje ją też zakolejkuj() — kropka nowego wpisu pojawia się
+ * w TYM SAMYM ticku co tapnięcie, nawet gdy inny wpis jest w locie
+ * (do v0.4.0 robiła to tylko pętla wysyłki, która przy wpisie w locie
+ * wychodziła wcześnie → kafel drugiej osoby był „niemy" aż do
+ * rozliczenia pierwszej — objaw zgłoszony przez właściciela w r33). */
 function zsynchronizujWisiace() {
   S.wisiace = {};
   if (S.wLocie) S.wisiace[S.wLocie.id] = S.wLocie.akcja === 'usunObecnosc' ? 'usun' : 'zapis';

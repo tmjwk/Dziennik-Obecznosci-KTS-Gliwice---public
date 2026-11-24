@@ -150,7 +150,13 @@
     .kafel.obecny .status { background: var(--obecny); border-color: var(--obecny); color: #fff; }
     .kafel.potwierdz .status { background: var(--ostrz); border-color: var(--ostrz); color: #fff; font-size: .78rem; }
     .kafel.potwierdz { border-color: var(--ostrz); background: #fdf1e7; }
-    .kafel.synchronizacja .status { border-style: dashed; }
+    /* r33: kropka „…" kafla czekającego WIDOCZNA — do v0.4.0 .status
+     * dziedziczył color:transparent (bazowy krąg) i „…" nie było
+     * w ogóle widać; teraz przerywana ramka + znak w akcencie */
+    .kafel.synchronizacja .status {
+      border-style: dashed; border-color: var(--akcent);
+      color: var(--akcent); background: #eef6f1;
+    }
     .kafel.blad { border-width: 2px; }
 
     /* ---------- r32: maszyna stanów kafla (model pesymistyczny) ----------
