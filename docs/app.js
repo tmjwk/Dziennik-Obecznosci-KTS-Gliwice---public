@@ -152,11 +152,28 @@
  * Transmisja nadal PO JEDNEJ (LockService na serwerze), ale każdy tap
  * ma natychmiastową reakcję: kropka = „przyjęte, czeka w kolejce",
  * pulsujący kafel = „leci właśnie", ✓ = „arkusz potwierdził".
+ *
+ * r34 („przy logowaniu frontend musi otwierać się w najnowszej wersji,
+ * nie z cache — to aplikacja, nie strona"): przeglądarka trzyma app.js
+ * nawet 10 min (Cache-Control GitHub Pages) — user mógł zalogować się
+ * do STAREJ wersji. Teraz: (1) publish generuje wersja.json + dopina
+ * ?v= do script tagów (zmiana URL = świeży plik, cache jest kluczowany
+ * adresem), (2) apka przy starcie I każdym powrocie do niej (odlokowanie
+ * telefonu, karta na wierzch) pobiera wersja.json z cache:'no-store';
+ * gdy live jest nowsza — auto-przeładowanie (?aktualizacja= omija cache
+ * HTML), a gdy wisi kolejka/wysyłka — baner „Zaktualizuj teraz"
+ * (nie przerywamy pracy; kolejka w localStorage przetrwa). Strażnik
+ * anty-pętli: max 1 auto-reload / 30 s. Błąd sieci = cisza — kontrola
+ * wersji nie blokuje apki.
+ * BONUS (pytanie nr 2, multi-urządzenie): ten sam powrót do apki robi
+ * CICHY dajStan — obecności zaznaczone na innym urządzeniu pojawiają
+ * się same (duplikatom i tak zapobiega idempotentny backend: ten sam
+ * zawodnik+dzień → istnialo:true, zero nowego wiersza).
  * ================================================================= */
 
 'use strict';
 
-var WERSJA_UI = 'v0.4.1';
+var WERSJA_UI = 'v0.4.2';
 
 /* r25: najstarsza wersja API (Apps Script), z jaką ta strona umie
  * współpracować. v0.2.4 = akcje grup (dodajGrupe/edytujGrupe/usunGrupe);
@@ -190,6 +207,93 @@ function banerWersji() {
     'Dodawanie i edycja grup nie zadziała, dopóki właściciel nie wgra nowego kodu: ' +
     'script.google.com → projekt Dziennika → zaznacz cały kod (Ctrl+A) → wklej nowy → zapisz (Ctrl+S) → ' +
     'Wdróż → Zarządzaj wdrożeniami → ✎ → Nowa wersja → Wdróż. Po ok. minucie odśwież stronę.' +
+    '</div>';
+}
+
+/* ------------------------------------------------ r34: zawsze najnowsza wersja */
+/* Strona to APLIKACJA, nie stronyka: przy każdym uruchomieniu i każdym
+ * powrocie do apki (odlokowanie telefonu, przełączenie karty) pytamy
+ * o wersja.json z cache:'no-store' (plik generowany przy publikacji,
+ * obok index.html). Gdy live jest NOWSZY niż ten egzemplarz:
+ *  - nic nie wisi (pusta kolejka, nic w locie) → AUTO-PRZEŁADOWANIE
+ *    (?aktualizacja=… omija cache HTML; ?v= przy skryptach wymusza
+ *    świeże app.js/config.js) — użytkownik zawsze na najnowszej;
+ *  - kolejka/wysyłka w toku → baner z przyciskiem „Zaktualizuj teraz"
+ *    (kolejka jest w localStorage i drenuje się po powrocie — nic nie
+ *    ginie, ale bez zgody użytkownika nie przerywamy mu pracy).
+ * Strażnik anty-pętli: max jedno auto-przeładowanie na 30 s (gdyby
+ * CDN trzymał starą wersję dłużej). Błędy sieci = cisza — kontrola
+ * wersji NIE MA prawa zablokować działania apki. */
+var OSTATNIE_SPRAWDZENIE_WERSJI = 0;
+var KLUCZ_RELOADU = 'dziennik_auto_reload';
+
+/* Czy jest coś, czego nie wolno nam stracić przeładowaniem? Wpis
+ * W LOCIE, wpis w kolejce, pauza — ALBO wpis zapisany w localStorage,
+ * którego jeszcze nie wczytaliśmy (start apki: wersja.json odpowiada
+ * szybciej niż dajStan zdąży odtworzyć kolejkę — bez tego auto-reload
+ * po kliknięciu „Zaktualizuj teraz" odpalałby się DRUGI raz, zanim
+ * kolejka wróciła by do pamięci). */
+function wisiZapisanaKolejka() {
+  if (S.wLocie || S.kolejka.length || S.pauza) return true;
+  if (KOLEJKA_WCZYTANA) return false; // już wczytana (i pusta) — bezpiecznie
+  try {
+    var d = JSON.parse(localStorage.getItem(KLUCZ_KOLEJKI) || 'null');
+    if (d && Array.isArray(d.wpisy) && d.wpisy.length) return true;
+  } catch (ign) {}
+  return false;
+}
+
+function sprawdzWersjeStrony() {
+  var teraz = Date.now();
+  if (teraz - OSTATNIE_SPRAWDZENIE_WERSJI < 60000) return; // throttle 60 s
+  OSTATNIE_SPRAWDZENIE_WERSJI = teraz;
+  fetch('wersja.json?t=' + teraz, { cache: 'no-store' })
+    .then(function (odp) { return odp.ok ? odp.json() : null; })
+    .then(function (d) {
+      if (!d || !d.wersja) return;
+      if (porownajWersje(String(d.wersja), WERSJA_UI) <= 0) {
+        // mamy najnowszą — sprzątnij ewentualny baner, o ile był
+        if (S.dostepnaWersja) { S.dostepnaWersja = null; if (S.stan) renderuj(); }
+        return;
+      }
+      if (wisiZapisanaKolejka()) {
+        // w trakcie pracy / kolejka jeszcze nie wróciła z localStorage —
+        // nie przerywamy, tylko informujemy (ekran logowania: S.stan null
+        // → cicho; banner nie ma gdzie wisieć, decyzja wróci przy
+        // kolejnym sprawdzeniu po wczytaniu stanu)
+        if (S.stan) { S.dostepnaWersja = String(d.wersja); renderuj(); }
+        return;
+      }
+      przeladujStrone();
+    })
+    .catch(function () { /* offline / plik niedostępny — działamy dalej */ });
+}
+
+/* Przeładowanie z obejściem cache: ?aktualizacja= to unikalny URL →
+ * przeglądarka pobiera ŚWIEŻY HTML, a ?v= przy skryptach (doklejane
+ * przy publikacji) wyciąga nowe app.js/config.js. uzytkownik=true
+ * (klik „Zaktualizuj teraz" w banerze) przeładowuje ZAWSZE — polecenie
+ * człowieka jest niepodważalne; przeładowanie AUTOMATYCZNE ma strażnika
+ * 30 s (krawędź CDN potrafi chwilę serwować starą wersję — bez
+ * strażnika mielibyśmy pętlę przeładowań). */
+function przeladujStrone(uzytkownik) {
+  if (!uzytkownik) {
+    var ostatni = 0;
+    try { ostatni = parseInt(sessionStorage.getItem(KLUCZ_RELOADU) || '0', 10) || 0; } catch (ign) {}
+    if (Date.now() - ostatni < 30000) return; // właśnie próbowaliśmy — nie zapętlamy
+    try { sessionStorage.setItem(KLUCZ_RELOADU, String(Date.now())); } catch (ign) {}
+  }
+  location.href = location.pathname + '?aktualizacja=' + Date.now();
+}
+
+/* r34: baner „dostępna nowa wersja" (gdy auto-reload niemożliwy, bo
+ * kolejka wisi) — renderowany obok banerWersji/banerPauzy */
+function banerAktualizacji() {
+  if (!S.dostepnaWersja) return '';
+  return '<div class="baner-aktualizacji">' +
+    '<span><b>Dostępna nowa wersja aplikacji</b> (masz ' + WERSJA_UI +
+    ', jest ' + esc(S.dostepnaWersja) + '). Kolejka obecności jest zapisana i po aktualizacji sama się wyśle.</span>' +
+    '<button onclick="przeladujStrone(true)">Zaktualizuj teraz</button>' +
     '</div>';
 }
 
@@ -358,6 +462,7 @@ var S = {
   , kolejka: []          // NIEWYSŁANE intencje: {id, akcja, data}
   , wLocie: null         // wpis wysłany właśnie do serwera (lub null)
   , pauza: null          // 'sesja' | 'arkusz' | null — wstrzymana wysyłka
+  , dostepnaWersja: null // r34: nowa wersja na serwerze, gdy kolejka blokuje auto-reload (baner)
 };
 
 /* ------------------------------------------------ sesja (r28)
@@ -548,6 +653,7 @@ function renderuj() {
     '</div>' +
     banerWersji() +
     banerPauzy() +
+    banerAktualizacji() +
     '<div class="lista">' +
       lista.map(kafelHtml).join('') +
       (S.bladAkcji ? dymekBledu() : '') +
@@ -1176,6 +1282,7 @@ function renderujCzlonkow(app) {
     '<div class="lista" style="display:block;max-width:720px">' +
       banerWersji() +
       banerPauzy() +
+      banerAktualizacji() +
       wszyscy.filter(function (z) {
         if (!S.szukane) return true;
         var sz = S.szukane.toLowerCase();
@@ -1393,9 +1500,14 @@ function scalZmiane(modyfikator, potwierdz) {
  * true = odczyt już widzi naszą zmianę (koniec), false = jeszcze nie →
  * kolejna próba po 1,2s (max `proby`). Bez potwierdzenia działa jak
  * zwykłe odswiezStan (jedno dajStan + render). */
-function odswiezStan(cb, proby, potwierdz) {
+function odswiezStan(cb, proby, potwierdz, cicho) {
   wywolaj('dajStan', { token: TOKEN }, function (e, w) {
     if (e) {
+      /* r34: cicho=true (powrót do apki) — błąd sieci przy odświeżaniu
+       * w tle NIE ma prawa zamiatać ekranu dziennika; user zostaje
+       * na tym, co widział (dane i tak nie starsze niż jego ostatnia
+       * akcja; przy następnej akcji dostanie normalny komunikat) */
+      if (cicho) return;
       document.getElementById('app').innerHTML =
         '<div class="ekran-pelny"><h1 class="blad-tekst">Błąd połączenia</h1>' +
         '<p>' + esc(e.message) + '</p>' +
@@ -1867,6 +1979,10 @@ function pokazKonfiguracje() {
 
 /* ------------------------------------------------ start */
 function start() {
+  // r34: strona = APLIKACJA — najpierw sprawdzamy, czy na GitHub Pages
+  // jest nowsza wersja (wersja.json, no-store); user ma się logować
+  // ZAWSZE do najnowszej (ustalenie z właścicielem, „ważne!").
+  sprawdzWersjeStrony();
   // r17 (ekran logowania ma być PIERWSZY, zawsze): konfiguracja strony
   // nie blokuje wejścia — braki pokazuje żółta kartka na ekranie
   // logowania, kartę ustawień otwiera właściciel linkiem na dole.
@@ -1897,3 +2013,20 @@ function start() {
 }
 
 (function startAuto() { start(); })();
+
+/* r34: powrót do apki (odlokowanie telefonu / karta na wierzch) traktujemy
+ * jak otwarcie aplikacji: (1) sprawdzamy wersję — auto-aktualizacja,
+ * (2) CICHY dajStan — obecności zaznaczone na INNYM urządzeniu (drugi
+ * trener, ten sam trening) pojawiają się same, bez działania usera.
+ * Multi-urządzenie: duplikatom i tak zapobiega idempotentny backend
+ * (ten sam zawodnik+dzień → istnialo:true, zero nowego wiersza), tu
+ * chodzi o to, by drugi trener WIDZIAŁ stan pierwszego przed tapnięciem.
+ * Cisza przy błędzie sieci (patrz odswiezStan); nie odświeżamy w trakcie
+ * wysyłki/kolejki (własne zmiany i tak nadejdą z odpowiedzi mutacji). */
+document.addEventListener('visibilitychange', function () {
+  if (document.visibilityState !== 'visible') return;
+  sprawdzWersjeStrony();
+  if (TOKEN && S.stan && !S.wLocie && !S.kolejka.length && !S.pauza) {
+    odswiezStan(null, null, null, true);
+  }
+});
