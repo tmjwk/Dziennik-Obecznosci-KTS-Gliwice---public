@@ -203,11 +203,36 @@
  * kolejki auto-reload sam (koniec wiszącego baneru). Na file:// i
  * przeglądarkach bez SW rejestracja cicho nie wchodzi — model r34
  * dalej działa (progressive enhancement).
+ *
+ * r37 (przegląd UI/UX pierwszego wiersza — 8 punktów właściciela,
+ * „miejsce jest cenne, każdy wie, do czego służy apka"):
+ *  1) tytuł „Obecność" SKASOWANY z topbara (r27 „Obecność" / r29
+ *     mobile „Obecność 0/37" — słowo zabierało ~90 px);
+ *  2) LICZNIK = KLIKNIĘCI (wysłane): r32 model pesymistyczny pokazywał
+ *     „N/M obecnych" dopiero PO potwierdzeniu arkusza — przy serii
+ *     szybkich tapów licznik zostawał w miejscu (każdy zapis w locie
+ *     ~1 s, kolejne w kolejce), trener liczył na oko. Teraz licznik
+ *     pokazuje PROJEKCJĘ stanu po drenażu (arkusz + w locie + kolejka
+ *     — ostatnia intencja wygrywa), „obecnych" → „kliknięci"; gdy coś
+ *     wisi — po rozliczeniu wraca do prawdy arkusza;
+ *  3) data MNIEJSZA na wszystkich szerokościach (kompakt r29 na
+ *     desktopie też; ikona 📅 tylko ≥1024 px, gdzie nie zabiera miejsca);
+ *  4) pole szukaj SKASOWANE z pierwszego wiersza — wszędzie lupa 🔍
+ *     rozwijająca drugi wiersz (wzorzec mobilny r29 na desktopie
+ *     i tablecie; „Szukaj…" + focus po rozwinięciu);
+ *  5) przełącznik „A→Z imię | A→Z nazwisko" SKASOWANY — wszędzie
+ *     JEDEN przycisk „⇅ Imię"/„⇅ Nazwisko" (tap przełącza, r29 mobile);
+ *  6) „👥 Członkowie" ZOSTAJE (desktop; na telefonie i tak w pasku
+ *     na dole od r29);
+ *  7) przycisk sortowania ZOSTAJE — patrz 5;
+ *  8) lupa sortowania… czyli lupa SZUKAJ zostaje — wszędzie.
+ * Jednolity topbar na desktopie/tablecie/telefonie = mniej osobnych
+ * reguł CSS i mniej miejsc, gdzie układy się rozjeżdżają.
  * ================================================================= */
 
 'use strict';
 
-var WERSJA_UI = 'v0.4.4';
+var WERSJA_UI = 'v0.5.0';
 
 /* r25: najstarsza wersja API (Apps Script), z jaką ta strona umie
  * współpracować. v0.2.4 = akcje grup (dodajGrupe/edytujGrupe/usunGrupe);
@@ -644,39 +669,28 @@ function renderuj() {
   if (S.trybCzlonkowie) { renderujCzlonkow(app); return; }
 
   var lista = widoczni();
-  var obecnosciDzien = (S.stan.obecnosci[S.data] || []);
-  var ileObecnych = lista.filter(function (z) { return obecnosciDzien.indexOf(z.id) !== -1; }).length;
+  var ileKliknietych = kliknieci();
 
   var html =
     '<div class="topbar">' +
-      /* r27/r29: desktop — JEDEN wiersz („Obecność", licznik, Data, szukaj,
-       * sortowanie, Członkowie). Mobile (≤640px, CSS): z topbara znika
-       * „Członkowie" (przejmuje je stały pasek na dole ekranu), szukaj
-       * chowa się za lupą (drugi wiersz po rozwinięciu), licznik i data
-       * robią się kompaktowe — wszystko po to, by reszta zmieściła się
-       * w jednym wierszu na telefonie. */
+      /* r37: jeden topbar dla WSZYSTKICH szerokości (8 punktów przeglądu
+       * UI): bez tytułu „Obecność" (każdy wie, co to za apka — miejsce
+       * cenne), licznik KLIKNIĘTYCH (wysłanych, patrz kliknieci()),
+       * kompaktowa data, lupa 🔍 rozwijająca drugi wiersz szukaj (wsędzie,
+       * nie tylko na telefonie — wzorzec r29), sort JEDNYM przyciskiem
+       * ⇅ (tap: imię ⇄ nazwisko), „👥 Członkowie" na desktopie (na
+       * telefonie i tak siedzi w pasku na dole ekranu, r29). */
       '<div class="rzad1">' +
-        '<span class="tytul">Obecność</span>' +
-        /* r29: licznik w dwóch wariantach — desktop „3/4 obecnych",
-         * mobile „3/4" (CSS wybiera; tekst musi być w JS, CSS go nie skróci) */
-        '<span class="licznik"><span class="pelny">' + ileObecnych + '/' + lista.length + ' obecnych</span><span class="krotki">' + ileObecnych + '/' + lista.length + '</span></span>' +
+        '<span class="licznik" title="Kliknięci (wysłane) / wszyscy widoczni">' + ileKliknietych + '/' + lista.length + ' kliknięci</span>' +
         '<span class="btn-data"><span class="ikona-data">📅</span><input type="date" class="data-input" id="data" value="' + S.data + '" max="' + lokalnaData(new Date()) + '"></span>' +
-        '<input class="szukaj" id="szukaj" type="search" placeholder="Szukaj…" value="' + esc(S.szukane) + '">' +
-        '<div class="przelacznik">' +
-          '<button id="sort-imie" class="' + (S.sortowanie === 'imie' ? 'on' : '') + '">A→Z imię</button>' +
-          '<button id="sort-nazwisko" class="' + (S.sortowanie === 'nazwisko' ? 'on' : '') + '">A→Z nazwisko</button>' +
-        '</div>' +
-        '<button class="btn-ikona" id="btn-czlonkowie" title="Członkowie">👥 Członkowie</button>' +
-        /* r29 mobile: lupa (rozwija szukaj w drugim wierszu) + sort jako
-         * JEDEN przełącznik (tap: imię ⇄ nazwisko). Widoczne TYLKO ≤640px
-         * (CSS); data zostaje natywnym inputem — na telefonie to on
-         * otwiera systemowy picker (niezawodnie, showPicker bywa kapryśny) */
         '<button class="btn-ikona btn-sort-mobilny" id="btn-sort-k" title="Sortowanie">⇅ ' +
           (S.sortowanie === 'nazwisko' ? 'Nazwisko' : 'Imię') + '</button>' +
         '<button class="btn-ikona btn-szukaj-mobilny" id="btn-szukaj" title="Szukaj">🔍</button>' +
+        '<button class="btn-ikona" id="btn-czlonkowie" title="Członkowie">👥 Członkowie</button>' +
       '</div>' +
-      /* r29 mobile: pole szukaj po rozwinięciu lupą (drugi wiersz topbara);
-       * na desktopie nigdy nie pokazane (media query + klasa .otwarty) */
+      /* r29→r37: drugi wiersz szukaj rozwijany lupą — dotąd tylko mobile,
+       * teraz na każdym ekranie (pole „Szukaj…" znika z pierwszego
+       * wiersza; focus po rozwinięciu, filtrowanie w locie). */
       '<div class="rzad2 rzad2-mobilny' + (S.szukane ? ' otwarty' : '') + '" id="rzad2-mobilny"' + (S.szukane ? ' data-otwarty="1"' : '') + '>' +
         '<input class="szukaj" id="szukaj-mobilny" type="search" placeholder="Szukaj…" value="' + esc(S.szukane) + '">' +
       '</div>' +
@@ -817,6 +831,33 @@ function widoczni() {
       : a.nazwisko.localeCompare(b.nazwisko, 'pl') || a.imie.localeCompare(b.imie, 'pl');
   });
   return lista;
+}
+
+/* r37: LICZNIK KLIKNIĘTYCH (wysłanych) — punkt 2 przeglądu UI. Do v0.4.4
+ * licznik pokazywał potwierdzonych przez arkusz („N/M obecnych"), więc
+ * przy serii szybkich tapów stawał w miejscu (w locie ~1 s, reszta
+ * w kolejce — trener liczył na oko). Teraz liczymy PROJEKCJĘ stanu
+ * po drenażu: prawda arkusza + wpis w locie + kolejka FIFO (ostatnia
+ * intencja wygrywa, jak w tapZawodnika — „obecny + czekające usunięcie"
+ * liczy się jako NIEOBECNY). Rozliczenie (sukces/błąd) zawsze wraca
+ * do prawdy arkusza, więc licznik po serii zbiega do „obecnych". */
+function kliknieci() {
+  var dzien = (S.stan.obecnosci[S.data] || []);
+  var intencje = {};
+  if (S.wLocie && S.wLocie.data === S.data) {
+    intencje[S.wLocie.id] = S.wLocie.akcja;
+  }
+  S.kolejka.forEach(function (w) {
+    if (w.data === S.data) intencje[w.id] = w.akcja; // FIFO od czoła: ostatnia intencja wygrywa
+  });
+  var idzie = 0;
+  widoczni().forEach(function (z) {
+    var czy = dzien.indexOf(z.id) !== -1;
+    if (intencje[z.id] === 'zapiszObecnosc') czy = true;
+    if (intencje[z.id] === 'usunObecnosc') czy = false;
+    if (czy) idzie++;
+  });
+  return idzie;
 }
 
 /* kafel zawodnika — r32: maszyna stanów per kafel (model pesymistyczny).
@@ -1340,11 +1381,16 @@ function renderujCzlonkow(app) {
   app.innerHTML =
     '<div class="topbar">' +
       '<div class="rzad1">' +
-        '<span class="tytul">Członkowie (' + aktywni.length + ')</span>' +
+        '<span class="licznik" title="Aktywni członkowie klubu">Członkowie (' + aktywni.length + ')</span>' +
         '<button class="btn-ikona" id="btn-import" title="Wklej listę zawodników (Nazwisko Imię)">⬇ Import</button>' +
         '<button class="btn-ikona" id="btn-dodaj">＋ Dodaj</button>' +
       '</div>' +
-      '<div class="rzad2"><input class="szukaj" id="szukaj-czlonkowie" type="search" placeholder="Szukaj…" value="' + esc(S.szukane) + '"></div>' +
+      /* r37: członkowie — szukaj rozwijane tą samą lupą co w Obecności
+       * (jednolity wzorzec: drugi wiersz + .otwarty; bez „Obecności"-owej
+       * daty i sortowania, tu wystarcza filtr) */
+      '<div class="rzad2 rzad2-mobilny otwarty">' +
+        '<input class="szukaj" id="szukaj-czlonkowie" type="search" placeholder="Szukaj…" value="' + esc(S.szukane) + '">' +
+      '</div>' +
     '</div>' +
     '<div class="lista" style="display:block;max-width:720px">' +
       banerWersji() +
@@ -1651,7 +1697,10 @@ function podpinz() {
     S.data = this.value || lokalnaData(new Date());
     renderuj();
   });
-  if (el('szukaj')) el('szukaj').addEventListener('input', function () {
+  /* r37: szukaj ŻYJE tylko w drugim wierszu (rozwijany lupą) — na
+   * desktopie i na telefonie to samo pole #szukaj-mobilny (pole #szukaj
+   * z pierwszego wiersza skasowane w przeglądzie UI). */
+  if (el('szukaj-mobilny')) el('szukaj-mobilny').addEventListener('input', function () {
     S.szukane = this.value;
     var kontener = document.querySelector('.lista');
     var lista = widoczni();
@@ -1661,19 +1710,13 @@ function podpinz() {
     podpinzKafelki();
     aktualizujLicznik();
   });
-  if (el('sort-imie')) el('sort-imie').addEventListener('click', function () {
-    ustawSortowanie('imie');
-  });
-  if (el('sort-nazwisko')) el('sort-nazwisko').addEventListener('click', function () {
-    ustawSortowanie('nazwisko');
-  });
   if (el('btn-czlonkowie')) el('btn-czlonkowie').addEventListener('click', function () {
     S.trybCzlonkowie = true; S.szukane = ''; renderuj();
   });
-  /* r29 mobile: lupa rozwija/zwija pole szukaj (drugi wiersz topbara);
-   * przy otwarciu od razu focus — można pisać bez drugiego kliknięcia.
-   * NIE renderujemy od nowa całej strony (fokus by przepadł) — tylko
-   * dodajemy klasę i pokazujemy wiersz. */
+  /* r29→r37: lupa rozwija/zwija pole szukaj (drugi wiersz topbara) —
+   * dotąd tylko mobile, teraz na każdym ekranie; przy otwarciu od razu
+   * focus — można pisać bez drugiego kliknięcia. NIE renderujemy od
+   * nowa całej strony (fokus by przepadł) — tylko klasa i wiersz. */
   if (el('btn-szukaj')) el('btn-szukaj').addEventListener('click', function () {
     var rzad2 = document.getElementById('rzad2-mobilny');
     if (!rzad2) return;
@@ -1689,21 +1732,10 @@ function podpinz() {
       document.getElementById('szukaj-mobilny').focus();
     }
   });
-  /* r29 mobile: szukaj w drugim wierszu — to samo zachowanie co desktopowe
-   * (filtr w locie, bez pełnego renderu → focus zostaje) */
-  if (el('szukaj-mobilny')) el('szukaj-mobilny').addEventListener('input', function () {
-    S.szukane = this.value;
-    var kontener = document.querySelector('.lista');
-    var lista = widoczni();
-    kontener.innerHTML = lista.map(kafelHtml).join('') +
-      (S.bladAkcji ? dymekBledu() : '') ||
-      '<p class="oplucie" style="text-align:center">Brak zawodników spełniających kryteria.</p>';
-    podpinzKafelki();
-    aktualizujLicznik();
-  });
-  /* r29 mobile: sortowanie jako JEDEN przełącznik — tap przełącza
-   * imię ⇄ nazwisko (labelka przycisku odświeża się w pełnym renderze,
-   * jak w desktopowym ustawSortowanie) */
+  /* r29→r37: sortowanie JEDNYM przełącznikiem — tap przełącza
+   * imię ⇄ nazwisko (labelka przycisku odświeża się w pełnym renderze);
+   * dotąd tylko mobile, teraz wszędzie (przełącznik „A→Z imię | A→Z
+   * nazwisko" skasowany w przeglądzie UI). */
   if (el('btn-sort-k')) el('btn-sort-k').addEventListener('click', function () {
     ustawSortowanie(S.sortowanie === 'nazwisko' ? 'imie' : 'nazwisko');
   });
@@ -1769,19 +1801,12 @@ function ustawSortowanie(w) {
 function aktualizujLicznik() {
   var el = document.querySelector('.licznik');
   if (!el) return;
-  var lista = widoczni();
-  var dzien = S.stan.obecnosci[S.data] || [];
-  var ile = lista.filter(function (z) { return dzien.indexOf(z.id) !== -1; }).length;
-  /* r29: dwa warianty tekstowe (desktop „N/M obecnych", mobile „N/M");
-   * fallback textContent gdyby stary render nie miał spany w środku */
-  var pelny = el.querySelector('.pelny');
-  var krotki = el.querySelector('.krotki');
-  if (pelny && krotki) {
-    pelny.textContent = ile + '/' + lista.length + ' obecnych';
-    krotki.textContent = ile + '/' + lista.length;
-  } else {
-    el.textContent = ile + '/' + lista.length + ' obecnych';
-  }
+  /* r37: licznik KLIKNIĘTYCH — projekcja stanu po drenażu (arkusz +
+   * w locie + kolejka, patrz kliknieci()); tytuł dymka mówi resztę.
+   * Jeden wariant tekstu na wszystkich szerokościach (po kasacie
+   * „pelny/krotki" z r29 — tytułu nie ma, więc nic nie skracamy). */
+  el.textContent = kliknieci() + '/' + widoczni().length + ' kliknięci';
+  el.title = 'Kliknięci (wysłane) / wszyscy widoczni';
 }
 
 function podpinzCzlonkow() {
