@@ -251,13 +251,29 @@
  *     #15803D — audyt r38: 4.3:1 ≥ 3:1), błąd #DC2626, info #64748B.
  *     Kontrasty zweryfikowane skryptem r38_audit_kontrastow.py (tekst
  *     ≥4.5:1, duże ≥3:1 — pełny spis w WORKLOG r38). Zielony topbar
- *     ustępuje niebieskiemu klubowemu; kafel obecny zostaje jasny
+ *     ustąpił niebieskiemu klubowemu; kafel obecny zostaje jasny
  *     (czytelność listy > krzykliwy kolor).
+ *
+ * r39 (sprostowanie semantyki monitora — „sam się uczę, idzie mi o
+ * to, żeby interfejs był maksymalnie czytelny"):
+ *  - LEWA liczba pill-a = stan ustawiony LOKALNIE, natychmiast przy
+ *    tapnięciu (+1), trzecie tapnięcie/usunięcie −1. Nie czeka na
+ *    serwer — to to, co trener WIDZI na kaflach (projekcja dnia:
+ *    arkusz + w locie + kolejka, ostatnia intencja wygrywa);
+ *  - PRAWA liczba = potwierdzona PRAWDA ARKUSZA dnia: rusza się
+ *    dopiero po ACK; po potwierdzeniu usunięcia spada do faktycznej
+ *    liczby przesłanych obecności (stanDnia z odpowiedzi), nie −1;
+ *  - sekwencja właściciela: tap → 1/0, ACK → 1/1, trzy tapy → 0/1,
+ *    ACK → 0/0; X=Y i pusto w rurce = pełna synchronizacja;
+ *  - pill liczy WSZYSTKICH zawodników dnia (nie filtr widoku) i jest
+ *    silnie związany z datą (zmiana daty = inne liczby od razu).
+ *    Liczniki transakcji sesyjne r38 (tapySesja/przeslaneSesja)
+ *    SKASOWANE — nie mówiły, ilu jest obecnych.
  * ================================================================= */
 
 'use strict';
 
-var WERSJA_UI = 'v0.5.1';
+var WERSJA_UI = 'v0.5.2';
 
 /* r25: najstarsza wersja API (Apps Script), z jaką ta strona umie
  * współpracować. v0.2.4 = akcje grup (dodajGrupe/edytujGrupe/usunGrupe);
@@ -554,15 +570,11 @@ var S = {
   , wLocie: null         // wpis wysłany właśnie do serwera (lub null)
   , pauza: null          // 'sesja' | 'arkusz' | null — wstrzymana wysyłka
   , dostepnaWersja: null // r34: nowa wersja na serwerze, gdy kolejka blokuje auto-reload (baner)
-  /* r38: MONITOR PRZESYŁANIA (pill w topbarze) — liczby SESYJNE, czyli
-   * podgląd RURKI (kolejka + w locie), nie stanu dnia: tapySesja rośnie
-   * o 1 przy KAŻDEJ zebranej intencji (tap 1/3 zapisu, tap 3/3 usunięcia,
-   * zmiana zdania na kaflu czekającym — koalescing liczy jako nową
-   * intencję), przeslaneSesja o 1 przy każdej rozliczonej SUKCESEM.
-   * Błędy NIE zwiększają przeslaneSesja (wpis czeka na ponowienie).
-   * Reset = odświeżenie strony (świadomie: to monitor „co TERAZ leci"). */
-  , tapySesja: 0
-  , przeslaneSesja: 0
+  /* r39: monitor (pill „X/Y obecnych") liczy się NA BIEŻĄCO ze stanu
+   * (patrz monitorPrzesylania) — lewa = prawda arkusza + wLocie + kolejka
+   * (projekcja dnia), prawa = potwierdzone zapisy dnia. Liczniki sesyjne
+   * r38 (tapySesja/przeslaneSesja) SKASOWANE: transakcje nie mówią
+   * trenerowi, ilu jest obecnych. */
 };
 
 /* ------------------------------------------------ sesja (r28)
@@ -713,11 +725,12 @@ function renderuj() {
        * (wsędzie, nie tylko na telefonie — wzorzec r29), sort JEDNYM
        * przyciskiem ⇅ (tap: imię ⇄ nazwisko), „👥 Członkowie" na
        * desktopie (na telefonie i tak siedzi w pasku na dole, r29).
-       * r38: pill po lewej to MONITOR PRZESYŁANIA („X tapy · Y
-       * przesłanych" — patrz monitorPrzesylania): świeci granatem,
+       * r39: pill po lewej to MONITOR OBECNOŚCI „X/Y obecnych" (patrz
+       * monitorPrzesylania): lewa = stan ustawiony lokalnie (+1/−1
+       * od razu), prawa = potwierdzone przez arkusz; granat „leci"
        * dopóki coś leci/czeka w kolejce. */
       '<div class="rzad1">' +
-        '<span class="licznik' + (monitor.wisi ? ' leci' : '') + '" title="Tapy zebrane w tej sesji / przesłane (potwierdzone zapisem w arkuszu)">' +
+        '<span class="licznik' + (monitor.wisi ? ' leci' : '') + '" title="Obecni ustawieni (kafle: tap +1, trzy tapy −1) / potwierdzone zapisem w arkuszu. Równe liczby = wszystko przesłane.">' +
           monitorTekst() + '</span>' +
         '<span class="btn-data"><span class="ikona-data">📅</span><input type="date" class="data-input" id="data" value="' + S.data + '" max="' + lokalnaData(new Date()) + '"></span>' +
         '<button class="btn-ikona btn-sort-mobilny" id="btn-sort-k" title="Sortowanie">⇅ ' +
@@ -870,17 +883,27 @@ function widoczni() {
   return lista;
 }
 
-/* r37: LICZNIK KLIKNIĘTYCH (wysłanych) — punkt 2 przeglądu UI. Do v0.4.4
- * licznik pokazywał potwierdzonych przez arkusz („N/M obecnych"), więc
- * przy serii szybkich tapów stawał w miejscu (w locie ~1 s, reszta
- * w kolejce — trener liczył na oko). Teraz liczymy PROJEKCJĘ stanu
- * po drenażu: prawda arkusza + wpis w locie + kolejka FIFO (ostatnia
- * intencja wygrywa, jak w tapZawodnika — „obecny + czekające usunięcie"
- * liczy się jako NIEOBECNY). Rozliczenie (sukces/błąd) zawsze wraca
- * do prawdy arkusza, więc licznik po serii zbiega do „obecnych".
- * r38: superseded by the MONITOR pill (monitorPrzesylania) — kliknieci()
- * zostaje jako funkcja pomocnicza (nie używana w topbarze). */
-function kliknieci() {
+/* r39: MONITOR OBECNOŚCI (pill w topbarze) — „X/Y obecnych", po semantyce
+ * właściciela (sprostowanie r38: „tapy liczone po tapnięciu, przesłania
+ * po potwierdzeniu; trzy tapy dają -1"):
+ *  - LEWA (X, „tapy") = STAN USTAWIONY LOKALNIE, natychmiast: tap w kaflu
+ *    → +1 od razu (nawet zanim poleci do serwera), trzecie tapnięcie
+ *    (usunięcie) → -1. Liczymy PROJEKCJĘ dnia: prawda arkusza + wpis
+ *    w locie + kolejka (ostatnia intencja wygrywa — dokładnie to, co
+ *    widzą kafle). Zmiana zdania (zapis→usun w kolejce) X po prostu
+ *    odzwierciedla — bez licznika transakcji.
+ *  - PRAWA (Y, „przesłane") = POTWIERDZONA PRAWDA ARKUSZA dla dnia:
+ *    rusza się TYLKO po ACK (zapis +1, usunięcie spada do faktycznej
+ *    liczby przesłanych obecności). Błąd sieci Y nie rusza (wpis czeka
+ *    na ponowienie w kolejce).
+ *  - Czyli: tap → 1/0, ACK → 1/1, trzy tapy → 0/1, ACK → 0/0.
+ *    X=Y i nic w locie/kolejce = pełna synchronizacja.
+ *  - Liczone po WSZYSTKICH zawodnikach dnia (nie filtr szukaj/grupy —
+ *    to stan dnia, nie widoku; zmiana daty = natychmiast inne liczby).
+ * r37 liczyło to samo co lewa liczba (kliknieci()); r38 liczyło
+ * transakcje sesji (tapySesja/przeslaneSesja) — skasowane, bo licznik
+ * transakcji nie mówi trenerowi, ILU JEST obecnych. */
+function monitorPrzesylania() {
   var dzien = (S.stan.obecnosci[S.data] || []);
   var intencje = {};
   if (S.wLocie && S.wLocie.data === S.data) {
@@ -889,55 +912,29 @@ function kliknieci() {
   S.kolejka.forEach(function (w) {
     if (w.data === S.data) intencje[w.id] = w.akcja; // FIFO od czoła: ostatnia intencja wygrywa
   });
-  var idzie = 0;
-  widoczni().forEach(function (z) {
+  var ustawione = 0;
+  S.stan.zawodnicy.forEach(function (z) {
     var czy = dzien.indexOf(z.id) !== -1;
     if (intencje[z.id] === 'zapiszObecnosc') czy = true;
     if (intencje[z.id] === 'usunObecnosc') czy = false;
-    if (czy) idzie++;
+    if (czy) ustawione++;
   });
-  return idzie;
-}
-
-/* r38: MONITOR PRZESYŁANIA (pill w topbarze) — zgłoszenie właściciela:
- * „nie o odliczanie klikniętych — o MONITOROWANIE przesyłania wpisów,
- * np. dwa tapy / 0 przesłanych". Liczby SESYJNE (reset = F5), niezależne
- * od daty/filtra — to podgląd RURKI (kolejka + w locie), nie stanu dnia:
- *  - „X tapy"   = intencje zebrane w tej sesji (każde tapnięcie = 1;
- *                 3-tapowe usunięcie to JEDNA intencja = 1, bo tapy
- *                 1–2 to tylko licznik lokalny bez wpisu do kolejki);
- *  - „Y przesłanych" = rozliczone SUKCESEM (błąd nie liczy się — wpis
- *                 czeka na ponowienie, dopóki nie dojdzie, Y < X);
- *  - pill „aktywny" (granat #1A2433) = coś jeszcze leci/czeka;
- *  - po pełnym rozliczeniu neutralny: „X tapy · X przesłanych". */
-function monitorPrzesylania() {
-  var wisi = !!(S.wLocie || S.kolejka.length);
   return {
-    tapy: S.tapySesja,
-    przeslane: S.przeslaneSesja,
-    wisi: wisi,
-    tekst: S.tapySesja + ' tapy · ' + S.przeslaneSesja + ' przesłanych'
+    tapy: ustawione,          // stan ustawiony lokalnie (projekcja dnia)
+    przeslane: dzien.length,  // potwierdzone przez arkusz (prawda dnia)
+    wisi: !!(S.wLocie || S.kolejka.length)
   };
 }
 
-/** r38: tekst pill-a w zależności od liczby (1 tap → „1 tap").
- * Po polsku: 1 tap, 2-4 tapy, 5+ tapów. W wersji skróconej (mobile)
- * same cyfry bez odmiany — patrz monitorPrzesylaniaSkraca(). */
-function odmianaTapy(n) {
-  if (n === 1) return '1 tap';
-  if (n >= 2 && n <= 4) return n + ' tapy';
-  return n + ' tapów';
-}
-
-/** r38: pełny tekst pill-a (desktop) i skrót (≤640px): „2/0" zamiast
- * „2 tapy · 0 przesłanych". Tekst musi być w JS (CSS nie skróci liczby
- * słów) — to ta sama lekcja co r29 z „obecnych". Pełny tekst siedzi
- * w dymku (title), więc nic nie ginie. */
+/** r39: tekst pill-a: „X/Y" (mobile, ≤640px) / „X/Y obecnych" (desktop).
+ * Same cyfry, zero odmiany — liczbę słów („tapy", „przesłanych") CSS
+ * by nie skrócił, a właściciel notuje model właśnie jako „1/0", „1/1".
+ * Pełne wyjaśnienie w dymku (title). */
 function monitorTekst() {
   var m = monitorPrzesylania();
   return czyWaski()
     ? m.tapy + '/' + m.przeslane
-    : odmianaTapy(m.tapy) + ' · ' + m.przeslane + ' przesłanych';
+    : m.tapy + '/' + m.przeslane + ' obecnych';
 }
 
 /** r38: czy viewport wąski (≤640px)? Tej samej granicy używa CSS
@@ -1079,10 +1076,8 @@ function zakolejkuj(id, akcja) {
     }
   }
   if (!podmieniony) S.kolejka.push({ id: id, akcja: akcja, data: S.data });
-  /* r38: monitor przesyłania — KOALESCING to nowa intencja („zmiana
-   * zdania" = kolejne przesłanie do policzenia), więc +1 zawsze,
-   * niezależnie czy wpis nowy czy podmieniony. */
-  S.tapySesja++;
+  /* r39: monitor liczy się ze stanu (monitorPrzesylania) — tu nic nie
+   * naliczamy; lewa liczba X odzwierciedla kolejkę przez projekcję. */
   zapiszKolejke();
   /* r33: mapa kafli czekających od RAZU — kropka „w kolejce" rysuje się
    * w tym samym ticku co tapnięcie (renderuj zaraz po zakolejkuj w
@@ -1270,7 +1265,9 @@ function wysylaKolejke() {
     if (dzienZOdpowiedzi) {
       S.stan.obecnosci[dataWyslania] = dzienZOdpowiedzi;
     }
-    S.przeslaneSesja++; // r38: monitor przesyłania — rozliczone SUKCESEM
+    /* r39: prawa liczba monitora („przesłane") = stanDnia z tej odpowiedzi
+     * — spada do FAKTYCZNEJ liczby przesłanych obecności, nie +1/-1.
+     * Nic nie naliczamy; renderuj() przeliczy pill ze stanu. */
     zapiszKolejke(); // r31: kolejka się skróciła — trzymamy localStorage w zgodzie
     zsynchronizujWisiace();
     renderuj();
@@ -1892,14 +1889,15 @@ function ustawSortowanie(w) {
 function aktualizujLicznik() {
   var el = document.querySelector('.licznik');
   if (!el) return;
-  /* r38: pill = MONITOR PRZESYŁANIA („X tapy · Y przesłanych") — liczby
-   * sesyjne, klasa „leci" (granat) gdy coś w locie/kolejce. R37 liczyło
-   * ludzi („N/M kliknięci") — po wyjaśnieniu właściciela liczymy
-   * TRANSAKCJE. Wywoływane też po filtrze szukania (pełny render i tak
-   * pokaże to samo — tu tylko spójność). */
+  /* r39: pill = MONITOR OBECNOŚCI „X/Y obecnych" — lewa liczba = stan
+   * ustawiony lokalnie (natychmiast: tap +1, trzy tapy −1), prawa =
+   * potwierdzone przez arkusz. Klasa „leci" (granat) gdy coś w locie/
+   * kolejce. R38 liczyło transakcje sesji — skasowane; liczby są teraz
+   * po WSZYSTKICH zawodnikach dnia, więc filtr szukaj/grupy ich nie
+   * zmienia (aktualizacja po filtrze zostaje dla spójności). */
   var m = monitorPrzesylania();
   el.textContent = monitorTekst();
-  el.title = 'Tapy zebrane w tej sesji / przesłane (potwierdzone zapisem w arkuszu)';
+  el.title = 'Obecni ustawieni (kafle: tap +1, trzy tapy −1) / potwierdzone zapisem w arkuszu. Równe liczby = wszystko przesłane.';
   if (m.wisi) el.classList.add('leci'); else el.classList.remove('leci');
 }
 
