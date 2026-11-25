@@ -169,11 +169,26 @@
  * CICHY dajStan — obecności zaznaczone na innym urządzeniu pojawiają
  * się same (duplikatom i tak zapobiega idempotentny backend: ten sam
  * zawodnik+dzień → istnialo:true, zero nowego wiersza).
+ *
+ * r35 (zgłoszenia: „po serii usunięć ostatni przycisk zostaje obecny",
+ * „usuwanie serii nie działa", „6 s na osobę"): naprawa merżu dnia po
+ * mutacji. Backend v0.2.6–0.2.7 doklejał pełny stan, ale mapa dni jest
+ * budowana z WIESZY — gdy usunięcie OPRÓŻNIŁO dzień, klucz 'RRRR-MM-DD'
+ * ZNIKAŁ z odpowiedzi, a frontend mergował dzień TYLKO pod warunkiem
+ * istnienia klucza → kafel ostatnio usuniętej osoby zostawał zielony
+ * (objaw „ostatni przycisk obecny"; w serii usunięć PRAWIE każdy kafel
+ * był „ostatni w swoim momencie"). Teraz: (a) backend v0.2.8 dokleja
+ * stanDnia {data, obecnosci:[…]} z GWARANTOWANYM kluczem (pusty dzień
+ * = []), (b) frontend bierze stanDnia, a przy starym serwerze robi
+ * w.stan.obecnosci[data] || [] — klucz nieistniejący w odpowiedzi
+ * bieżącego miesiąca = dzień pusty w arkuszu = []. Do tego backend
+ * v0.2.8: 1× ensureSheets (było 2× ≈ 58 wywołań API na mutację ≈ 6 s
+ * „na osobę"; teraz ~17) i okno 300 wierszy w usuwaniu (był pełny log).
  * ================================================================= */
 
 'use strict';
 
-var WERSJA_UI = 'v0.4.2';
+var WERSJA_UI = 'v0.4.3';
 
 /* r25: najstarsza wersja API (Apps Script), z jaką ta strona umie
  * współpracować. v0.2.4 = akcje grup (dodajGrupe/edytujGrupe/usunGrupe);
@@ -1069,15 +1084,34 @@ function wysylaKolejke() {
     // znaczeniach, a intencje czekające w kolejce drenują się po kolei
     // i po ich własnych odpowiedziach pojawi się ich kolor. Ktoś inny
     // mógł zapisać się w międzyczasie — jego wpis z odpowiedzi zostaje.
+    // r35: DWIE drogi przeniesienia dnia i obie z || [] na puste:
+    //  a) stanDnia (v0.2.8+) — { data, obecnosci: [...] } z kluczem
+    //     GWARANTOWANYM: pusty dzień = [], nie brak klucza. To naprawia
+    //     zgłoszenie r35 („po serii usunięć ostatni przycisk zostaje
+    //     obecny"): w v0.2.7 zbudujStan budował mapę dni z wierszy, więc
+    //     gdy usunięcie OPRÓŻNIŁO dzień, klucz znikał z w.stan → poniższy
+    //     warunek był fałszywy → kafel ostatniej osoby zostawał zielony.
+    //  b) w.stan (v0.2.6–v0.2.7, przejściowo) — MERGOWALIŚMY tylko gdy
+    //     klucz istniał; teraz: klucz w odpowiedzi istnieje → bierzemy;
+    //     klucza brak, ALE w.stan w ogóle niesie obecnosci → dzień jest
+    //     PUSTY w arkuszu (serwer widziałby wpis, gdyby istniał) → [].
+    //     Bez wyjątku merge — prawda arkusza zawsze trafia do UI.
     var padlStarySerwer = false;
-    if (w && w.stan && w.stan.obecnosci && w.stan.obecnosci[dataWyslania] && !w.stan.brakDostepu) {
-      S.stan.obecnosci[dataWyslania] = w.stan.obecnosci[dataWyslania];
+    var dzienZOdpowiedzi = null;
+    if (w && w.stanDnia && w.stanDnia.data === dataWyslania &&
+        Array.isArray(w.stanDnia.obecnosci)) {
+      dzienZOdpowiedzi = w.stanDnia.obecnosci;          // v0.2.8+: zawsze, pusty czy pełny
+    } else if (w && w.stan && w.stan.obecnosci && !w.stan.brakDostepu) {
+      dzienZOdpowiedzi = w.stan.obecnosci[dataWyslania] || []; // v0.2.6–7: pusty klucz = []
     } else {
       // serwer starszy niż v0.2.6 (bez stanu w odpowiedzi): kafel NIE
       // robi się zielony lokalnie (model pesymistyczny) — ✓ dowiezie
       // dajStan po zakończeniu drenażu (patrz niżej; per-operacyjny
       // dajStan w środku pętli mieszałby się z wysyłką)
       padlStarySerwer = true;
+    }
+    if (dzienZOdpowiedzi) {
+      S.stan.obecnosci[dataWyslania] = dzienZOdpowiedzi;
     }
     zapiszKolejke(); // r31: kolejka się skróciła — trzymamy localStorage w zgodzie
     zsynchronizujWisiace();
