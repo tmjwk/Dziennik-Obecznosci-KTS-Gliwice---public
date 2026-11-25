@@ -228,11 +228,36 @@
  *  8) lupa sortowania… czyli lupa SZUKAJ zostaje — wszędzie.
  * Jednolity topbar na desktopie/tablecie/telefonie = mniej osobnych
  * reguł CSS i mniej miejsc, gdzie układy się rozjeżdżają.
+ *
+ * r38 (dwa zgłoszenia właściciela):
+ *  1) „NIE o odliczanie klikniętych — idzie mi o MONITOROWANIE
+ *     przesyłania wpisów" (cytat: „np. dwa tapy / 0 przesłanych"):
+ *     pill w topbarze przestaje liczyć LUDZI, liczy TRANSAKCJE tej
+ *     sesji — „X tapy · Y przesłanych", gdzie X = intencje zebrane
+ *     (każde tapnięcie kafla dodaje 1; 3-tapowe usunięcie liczy się
+ *     jako JEDEN, bo to jedna intencja), Y = potwierdzone zapisy z tej
+ *     sesji. Gdy coś czeka (w locie / kolejka / pauza) — pill świeci
+ *     na granat (#1A2433), trener na pierwszy rzut oka widzi „jeszcze
+ *     leci"; gdy wszystko rozliczone — neutralny. Liczby sesyjne (nie
+ *     zależą od daty/filtra — to monitor RURKI, nie stanu dnia);
+ *     reset przy odświeżeniu strony.
+ *  2) PALETA 60-30-10 klubowa (system projektowy strony klubowej):
+ *     60% neutralne (biel #FFFFFF, chmura #F5F7FA, mgiełka #DBE3EC,
+ *     grafit #0F1B2D, granat #1A2433, stal #5A6A7E), 30% podstawowy
+ *     niebieski klubowy #0057B8 (przyciemniony z #0282FF dla WCAG AA),
+ *     10% akcent pomarańcz #FF6B35 — PIŁECZKA (z favicon.svg strony
+ *     klubu: piłka z koroną 5 gwiazdek, KTS 40+) i wyłącznie kluczowe
+ *     CTA. Funkcjonalne: obecny #16A34A (ikony na jasnych kaflach
+ *     #15803D — audyt r38: 4.3:1 ≥ 3:1), błąd #DC2626, info #64748B.
+ *     Kontrasty zweryfikowane skryptem r38_audit_kontrastow.py (tekst
+ *     ≥4.5:1, duże ≥3:1 — pełny spis w WORKLOG r38). Zielony topbar
+ *     ustępuje niebieskiemu klubowemu; kafel obecny zostaje jasny
+ *     (czytelność listy > krzykliwy kolor).
  * ================================================================= */
 
 'use strict';
 
-var WERSJA_UI = 'v0.5.0';
+var WERSJA_UI = 'v0.5.1';
 
 /* r25: najstarsza wersja API (Apps Script), z jaką ta strona umie
  * współpracować. v0.2.4 = akcje grup (dodajGrupe/edytujGrupe/usunGrupe);
@@ -369,7 +394,7 @@ function banerAktualizacji() {
  * NIE ginie: dokładają się do kolejki (drenują po powrocie sesji). */
 function banerPauzy() {
   if (!S.pauza || !S.kolejka.length) return '';
-  return '<div class="baner-wersji" id="baner-pauzy" style="border-color:#e6c96a;background:#fff7e0;color:#6b5b1e">' +
+  return '<div class="baner-wersji" id="baner-pauzy" style="border-color:var(--info);background:var(--tlo);color:var(--info)">' +
     (S.pauza === 'sesja'
       ? '<b>Sesja wygasła</b> — ' + S.kolejka.length + ' zmian czeka w kolejce. ' +
         'Zaloguj się ponownie, a lista dokończy wysyłkę do arkusza. '
@@ -529,6 +554,15 @@ var S = {
   , wLocie: null         // wpis wysłany właśnie do serwera (lub null)
   , pauza: null          // 'sesja' | 'arkusz' | null — wstrzymana wysyłka
   , dostepnaWersja: null // r34: nowa wersja na serwerze, gdy kolejka blokuje auto-reload (baner)
+  /* r38: MONITOR PRZESYŁANIA (pill w topbarze) — liczby SESYJNE, czyli
+   * podgląd RURKI (kolejka + w locie), nie stanu dnia: tapySesja rośnie
+   * o 1 przy KAŻDEJ zebranej intencji (tap 1/3 zapisu, tap 3/3 usunięcia,
+   * zmiana zdania na kaflu czekającym — koalescing liczy jako nową
+   * intencję), przeslaneSesja o 1 przy każdej rozliczonej SUKCESEM.
+   * Błędy NIE zwiększają przeslaneSesja (wpis czeka na ponowienie).
+   * Reset = odświeżenie strony (świadomie: to monitor „co TERAZ leci"). */
+  , tapySesja: 0
+  , przeslaneSesja: 0
 };
 
 /* ------------------------------------------------ sesja (r28)
@@ -669,19 +703,22 @@ function renderuj() {
   if (S.trybCzlonkowie) { renderujCzlonkow(app); return; }
 
   var lista = widoczni();
-  var ileKliknietych = kliknieci();
+  var monitor = monitorPrzesylania();
 
   var html =
     '<div class="topbar">' +
       /* r37: jeden topbar dla WSZYSTKICH szerokości (8 punktów przeglądu
        * UI): bez tytułu „Obecność" (każdy wie, co to za apka — miejsce
-       * cenne), licznik KLIKNIĘTYCH (wysłanych, patrz kliknieci()),
-       * kompaktowa data, lupa 🔍 rozwijająca drugi wiersz szukaj (wsędzie,
-       * nie tylko na telefonie — wzorzec r29), sort JEDNYM przyciskiem
-       * ⇅ (tap: imię ⇄ nazwisko), „👥 Członkowie" na desktopie (na
-       * telefonie i tak siedzi w pasku na dole ekranu, r29). */
+       * cenne), kompaktowa data, lupa 🔍 rozwijająca drugi wiersz szukaj
+       * (wsędzie, nie tylko na telefonie — wzorzec r29), sort JEDNYM
+       * przyciskiem ⇅ (tap: imię ⇄ nazwisko), „👥 Członkowie" na
+       * desktopie (na telefonie i tak siedzi w pasku na dole, r29).
+       * r38: pill po lewej to MONITOR PRZESYŁANIA („X tapy · Y
+       * przesłanych" — patrz monitorPrzesylania): świeci granatem,
+       * dopóki coś leci/czeka w kolejce. */
       '<div class="rzad1">' +
-        '<span class="licznik" title="Kliknięci (wysłane) / wszyscy widoczni">' + ileKliknietych + '/' + lista.length + ' kliknięci</span>' +
+        '<span class="licznik' + (monitor.wisi ? ' leci' : '') + '" title="Tapy zebrane w tej sesji / przesłane (potwierdzone zapisem w arkuszu)">' +
+          monitorTekst() + '</span>' +
         '<span class="btn-data"><span class="ikona-data">📅</span><input type="date" class="data-input" id="data" value="' + S.data + '" max="' + lokalnaData(new Date()) + '"></span>' +
         '<button class="btn-ikona btn-sort-mobilny" id="btn-sort-k" title="Sortowanie">⇅ ' +
           (S.sortowanie === 'nazwisko' ? 'Nazwisko' : 'Imię') + '</button>' +
@@ -840,7 +877,9 @@ function widoczni() {
  * po drenażu: prawda arkusza + wpis w locie + kolejka FIFO (ostatnia
  * intencja wygrywa, jak w tapZawodnika — „obecny + czekające usunięcie"
  * liczy się jako NIEOBECNY). Rozliczenie (sukces/błąd) zawsze wraca
- * do prawdy arkusza, więc licznik po serii zbiega do „obecnych". */
+ * do prawdy arkusza, więc licznik po serii zbiega do „obecnych".
+ * r38: superseded by the MONITOR pill (monitorPrzesylania) — kliknieci()
+ * zostaje jako funkcja pomocnicza (nie używana w topbarze). */
 function kliknieci() {
   var dzien = (S.stan.obecnosci[S.data] || []);
   var intencje = {};
@@ -858,6 +897,53 @@ function kliknieci() {
     if (czy) idzie++;
   });
   return idzie;
+}
+
+/* r38: MONITOR PRZESYŁANIA (pill w topbarze) — zgłoszenie właściciela:
+ * „nie o odliczanie klikniętych — o MONITOROWANIE przesyłania wpisów,
+ * np. dwa tapy / 0 przesłanych". Liczby SESYJNE (reset = F5), niezależne
+ * od daty/filtra — to podgląd RURKI (kolejka + w locie), nie stanu dnia:
+ *  - „X tapy"   = intencje zebrane w tej sesji (każde tapnięcie = 1;
+ *                 3-tapowe usunięcie to JEDNA intencja = 1, bo tapy
+ *                 1–2 to tylko licznik lokalny bez wpisu do kolejki);
+ *  - „Y przesłanych" = rozliczone SUKCESEM (błąd nie liczy się — wpis
+ *                 czeka na ponowienie, dopóki nie dojdzie, Y < X);
+ *  - pill „aktywny" (granat #1A2433) = coś jeszcze leci/czeka;
+ *  - po pełnym rozliczeniu neutralny: „X tapy · X przesłanych". */
+function monitorPrzesylania() {
+  var wisi = !!(S.wLocie || S.kolejka.length);
+  return {
+    tapy: S.tapySesja,
+    przeslane: S.przeslaneSesja,
+    wisi: wisi,
+    tekst: S.tapySesja + ' tapy · ' + S.przeslaneSesja + ' przesłanych'
+  };
+}
+
+/** r38: tekst pill-a w zależności od liczby (1 tap → „1 tap").
+ * Po polsku: 1 tap, 2-4 tapy, 5+ tapów. W wersji skróconej (mobile)
+ * same cyfry bez odmiany — patrz monitorPrzesylaniaSkraca(). */
+function odmianaTapy(n) {
+  if (n === 1) return '1 tap';
+  if (n >= 2 && n <= 4) return n + ' tapy';
+  return n + ' tapów';
+}
+
+/** r38: pełny tekst pill-a (desktop) i skrót (≤640px): „2/0" zamiast
+ * „2 tapy · 0 przesłanych". Tekst musi być w JS (CSS nie skróci liczby
+ * słów) — to ta sama lekcja co r29 z „obecnych". Pełny tekst siedzi
+ * w dymku (title), więc nic nie ginie. */
+function monitorTekst() {
+  var m = monitorPrzesylania();
+  return czyWaski()
+    ? m.tapy + '/' + m.przeslane
+    : odmianaTapy(m.tapy) + ' · ' + m.przeslane + ' przesłanych';
+}
+
+/** r38: czy viewport wąski (≤640px)? Tej samej granicy używa CSS
+ * (media query topbara) — jedna granica, zero rozjazdów. */
+function czyWaski() {
+  return window.matchMedia('(max-width: 640px)').matches;
 }
 
 /* kafel zawodnika — r32: maszyna stanów per kafel (model pesymistyczny).
@@ -993,6 +1079,10 @@ function zakolejkuj(id, akcja) {
     }
   }
   if (!podmieniony) S.kolejka.push({ id: id, akcja: akcja, data: S.data });
+  /* r38: monitor przesyłania — KOALESCING to nowa intencja („zmiana
+   * zdania" = kolejne przesłanie do policzenia), więc +1 zawsze,
+   * niezależnie czy wpis nowy czy podmieniony. */
+  S.tapySesja++;
   zapiszKolejke();
   /* r33: mapa kafli czekających od RAZU — kropka „w kolejce" rysuje się
    * w tym samym ticku co tapnięcie (renderuj zaraz po zakolejkuj w
@@ -1180,6 +1270,7 @@ function wysylaKolejke() {
     if (dzienZOdpowiedzi) {
       S.stan.obecnosci[dataWyslania] = dzienZOdpowiedzi;
     }
+    S.przeslaneSesja++; // r38: monitor przesyłania — rozliczone SUKCESEM
     zapiszKolejke(); // r31: kolejka się skróciła — trzymamy localStorage w zgodzie
     zsynchronizujWisiace();
     renderuj();
@@ -1801,12 +1892,15 @@ function ustawSortowanie(w) {
 function aktualizujLicznik() {
   var el = document.querySelector('.licznik');
   if (!el) return;
-  /* r37: licznik KLIKNIĘTYCH — projekcja stanu po drenażu (arkusz +
-   * w locie + kolejka, patrz kliknieci()); tytuł dymka mówi resztę.
-   * Jeden wariant tekstu na wszystkich szerokościach (po kasacie
-   * „pelny/krotki" z r29 — tytułu nie ma, więc nic nie skracamy). */
-  el.textContent = kliknieci() + '/' + widoczni().length + ' kliknięci';
-  el.title = 'Kliknięci (wysłane) / wszyscy widoczni';
+  /* r38: pill = MONITOR PRZESYŁANIA („X tapy · Y przesłanych") — liczby
+   * sesyjne, klasa „leci" (granat) gdy coś w locie/kolejce. R37 liczyło
+   * ludzi („N/M kliknięci") — po wyjaśnieniu właściciela liczymy
+   * TRANSAKCJE. Wywoływane też po filtrze szukania (pełny render i tak
+   * pokaże to samo — tu tylko spójność). */
+  var m = monitorPrzesylania();
+  el.textContent = monitorTekst();
+  el.title = 'Tapy zebrane w tej sesji / przesłane (potwierdzone zapisem w arkuszu)';
+  if (m.wisi) el.classList.add('leci'); else el.classList.remove('leci');
 }
 
 function podpinzCzlonkow() {
@@ -1901,21 +1995,46 @@ function wyloguj() {
   location.reload();
 }
 
+/* r38: PIŁECZKA KTS (10% akcent palety 60-30-10) — znak ze strony klubu
+ * (favicon.svg: piłka z koroną 5 gwiazdek, „KTS 40+"). Kolor: pomarańcz
+ * #FF6B35 z granatowym konturem #1A2433 (kontrast ikony ≥3:1 na każdym
+ * jasnym tle zapewnia kontur — audyt r38). Używana na ekranie logowania
+ * zamiast emoji 🏓 (emoji rysuje się różnie na iOS/Androidzie i nie
+ * niosła barw klubowych). */
+var PILKA_SVG =
+  '<svg viewBox="0 0 120 120" role="img" aria-label="Piłeczka KTS Gliwice" xmlns="http://www.w3.org/2000/svg">' +
+    '<defs>' +
+      '<radialGradient id="pk" cx="32%" cy="28%" r="75%">' +
+        '<stop offset="0%" stop-color="#FFE3D6"/>' +
+        '<stop offset="55%" stop-color="#FF8B5C"/>' +
+        '<stop offset="100%" stop-color="#FF6B35"/>' +
+      '</radialGradient>' +
+    '</defs>' +
+    '<circle cx="60" cy="60" r="55" fill="url(#pk)" stroke="#1A2433" stroke-width="4"/>' +
+    '<path fill="#1A2433" d="M0,-10 L2.24,-3.09 L9.51,-3.09 L3.64,1.18 L5.88,8.09 L0,3.82 L-5.88,8.09 L-3.64,1.18 L-9.51,-3.09 L-2.24,-3.09 Z" transform="translate(60 32)"/>' +
+    '<path fill="#1A2433" d="M0,-8 L1.79,-2.47 L7.61,-2.47 L2.91,0.95 L4.7,6.47 L0,3.05 L-4.7,6.47 L-2.91,0.95 L-7.61,-2.47 L-1.79,-2.47 Z" transform="translate(79 37)"/>' +
+    '<path fill="#1A2433" d="M0,-8 L1.79,-2.47 L7.61,-2.47 L2.91,0.95 L4.7,6.47 L0,3.05 L-4.7,6.47 L-2.91,0.95 L-7.61,-2.47 L-1.79,-2.47 Z" transform="translate(41 37)"/>' +
+    '<path fill="#1A2433" d="M0,-8 L1.79,-2.47 L7.61,-2.47 L2.91,0.95 L4.7,6.47 L0,3.05 L-4.7,6.47 L-2.91,0.95 L-7.61,-2.47 L-1.79,-2.47 Z" transform="translate(90 52)"/>' +
+    '<path fill="#1A2433" d="M0,-8 L1.79,-2.47 L7.61,-2.47 L2.91,0.95 L4.7,6.47 L0,3.05 L-4.7,6.47 L-2.91,0.95 L-7.61,-2.47 L-1.79,-2.47 Z" transform="translate(30 52)"/>' +
+    '<text x="60" y="88" font-family="Arial Narrow, Arial, sans-serif" font-size="22" font-weight="700" fill="#1A2433" text-anchor="middle" letter-spacing="1">KTS</text>' +
+    '<text x="60" y="108" font-family="Arial Narrow, Arial, sans-serif" font-size="14" font-weight="700" fill="#1A2433" text-anchor="middle" letter-spacing="0.4">40+</text>' +
+  '</svg>';
+
 function pokazLogowanie(komunikat) {
   var app = document.getElementById('app');
   // co brakuje do pełnego działania (r17: ekran logowania ma być PIERWSZY
-  // i ALWAYS — informacja o brakach to żółta kartka, nie karta ustawień)
+  // i ALWAYS — informacja o brakach to kartka info, nie karta ustawień)
   var braki = [];
   if (!K.API) braki.push('adres API (wdrożenie Apps Script)');
   if (!K.KLUCZ) braki.push('Client ID (logowanie Google)');
   app.innerHTML =
     '<div class="ekran-pelny logowanie">' +
-      '<div class="logo">🏓</div>' +
+      '<div class="logo">' + PILKA_SVG + '</div>' +
       '<h1>Dziennik Obecności</h1>' +
       '<p>KTS Gliwice — zapis obecności na treningach.<br>Zaloguj się kontem Google, na które właściciel klubu dał Ci dostęp.</p>' +
       (komunikat ? '<p style="color:var(--blad);font-size:.9rem">' + esc(komunikat) + '</p>' : '') +
       (braki.length
-        ? '<div style="background:#fff7e0;border:1px solid #e6c96a;border-radius:10px;padding:10px 14px;margin:6px 0 2px;max-width:420px;font-size:.85rem;color:#6b5b1e;text-align:left">' +
+        ? '<div style="background:var(--tlo);border:1px solid var(--info);border-radius:10px;padding:10px 14px;margin:6px 0 2px;max-width:420px;font-size:.85rem;color:var(--info);text-align:left">' +
             '⏳ Strona czeka na dokończenie podłączenia do arkusza przez właściciela (brakuje: ' + esc(braki.join(' i ')) + ').' +
             ' Gdy je uzupełni, przycisk poniżej od razu zadziała.</div>'
         : '') +
@@ -1936,8 +2055,8 @@ function zainicjujGoogle() {
     if (!pojemnik) return;
     pojemnik.innerHTML =
       '<button id="btn-google-off" style="display:inline-flex;align-items:center;gap:10px;' +
-        'background:#fff;border:1px solid #dadce0;border-radius:8px;min-height:44px;padding:0 18px;' +
-        'font-size:.95rem;color:#3c4043;cursor:pointer;box-shadow:0 1px 2px rgba(60,64,67,.2)">' +
+        'background:#fff;border:1px solid var(--linia);border-radius:8px;min-height:44px;padding:0 18px;' +
+        'font-size:.95rem;color:var(--tekst);cursor:pointer;box-shadow:0 1px 2px rgba(15,27,45,.15)">' +
         '<svg width="20" height="20" viewBox="0 0 48 48" aria-hidden="true"><path fill="#EA4335" d="M24 9.5c3.5 0 6.6 1.2 9 3.5l6.7-6.7C35.6 2.5 30.2 0 24 0 14.6 0 6.5 5.4 2.6 13.2l7.8 6.1C12.3 13.3 17.7 9.5 24 9.5z"/><path fill="#4285F4" d="M46.5 24.5c0-1.6-.1-3.1-.4-4.5H24v9h12.7c-.6 3-2.3 5.5-4.8 7.2l7.6 5.9c4.4-4.1 7-10.1 7-17.6z"/><path fill="#FBBC05" d="M10.4 28.7c-.5-1.5-.8-3-.8-4.7s.3-3.2.8-4.7l-7.8-6.1C.9 16.1 0 19.9 0 24s.9 7.9 2.6 11.3l7.8-6.6z"/><path fill="#34A853" d="M24 48c6.2 0 11.5-2 15.5-5.6l-7.6-5.9c-2.1 1.4-4.8 2.3-7.9 2.3-6.3 0-11.7-3.8-13.6-9.1l-7.8 6.6C6.5 42.6 14.6 48 24 48z"/></svg>' +
         'Zaloguj się z Google' +
       '</button>';
@@ -2146,6 +2265,19 @@ window.addEventListener('pageshow', function (ev) {
   if (TOKEN && S.stan && !S.wLocie && !S.kolejka.length && !S.pauza) {
     odswiezStan(null, null, null, true);
   }
+});
+
+/* r38: obrót telefonu / zwężenie okna — pill monitora ma DWA warianty
+ * tekstu (pełny desktop, skrót „X/Y" ≤640px) i po zmianie szerokości
+ * musi się przerysować (lekcja r29: tekstu nie skróci CSS). Tani,
+ * debounced render; nie strzela przy zwykłym scrollu. */
+var TIMER_RESIZE = null;
+window.addEventListener('resize', function () {
+  if (TIMER_RESIZE) clearTimeout(TIMER_RESIZE);
+  TIMER_RESIZE = setTimeout(function () {
+    TIMER_RESIZE = null;
+    if (S.stan && !S.trybCzlonkowie) aktualizujLicznik();
+  }, 150);
 });
 
 /* r36b: karta otwarta ciągle (trening) — kontrola wersji co 60 s nawet

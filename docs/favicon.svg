@@ -1,0 +1,28 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 120 120">
+  <!-- 1.7.4: piłka KTS ★★★★★ 40+ na kaflu klubowym — ten sam wzór
+       co sprite #pilka-kts na stronie (decyzja Tomka: bez „GLIWICE”,
+       5 gwiazdek, symetria). Font celowo systemowy: favicon renderuje
+       się bez strony, bez fontów Google. KTS poziome na środku (20/120,
+       text-anchor=middle — żaden fallback go nie utnie, bo to nie
+       textPath), korona 5 gwiazdek na okręgu r=30, „40+” 14/120. -->
+  <defs>
+    <radialGradient id="kula" cx="32%" cy="28%" r="75%">
+      <stop offset="0%" stop-color="#ffffff"/>
+      <stop offset="45%" stop-color="#fdfcf8"/>
+      <stop offset="75%" stop-color="#ece8dd"/>
+      <stop offset="100%" stop-color="#d9d4c5"/>
+    </radialGradient>
+    <path id="gw" d="M0,-9 L2.02,-2.78 L8.56,-2.78 L3.27,1.07 L5.29,7.29 L0,3.44 L-5.29,7.29 L-3.27,1.07 L-8.56,-2.78 L-2.02,-2.78 Z"/>
+  </defs>
+  <rect width="120" height="120" rx="22" fill="#0057B8"/>
+  <g transform="translate(60,60) scale(0.95) translate(-60,-60)">
+    <circle cx="60" cy="60" r="57" fill="url(#kula)"/>
+    <use href="#gw" transform="translate(60 30)" fill="#0057b8"/>
+    <use href="#gw" transform="translate(77.6 35.7)" fill="#0057b8"/>
+    <use href="#gw" transform="translate(42.4 35.7)" fill="#0057b8"/>
+    <use href="#gw" transform="translate(88.6 50.7)" fill="#0057b8"/>
+    <use href="#gw" transform="translate(31.4 50.7)" fill="#0057b8"/>
+    <text x="60" y="84" font-family="Arial Narrow, Arial, sans-serif" font-size="20" font-weight="700" fill="#0057b8" text-anchor="middle" letter-spacing="1" stroke="#0057b8" stroke-width="0.5" paint-order="stroke fill">KTS</text>
+    <text x="60" y="106" font-family="Arial Narrow, Arial, sans-serif" font-size="14" font-weight="700" fill="#0057b8" text-anchor="middle" letter-spacing="0.4" stroke="#0057b8" stroke-width="0.4" paint-order="stroke fill">40+</text>
+  </g>
+</svg>
