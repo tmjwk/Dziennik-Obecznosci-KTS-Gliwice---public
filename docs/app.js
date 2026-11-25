@@ -184,11 +184,30 @@
  * bieżącego miesiąca = dzień pusty w arkuszu = []. Do tego backend
  * v0.2.8: 1× ensureSheets (było 2× ≈ 58 wywołań API na mutację ≈ 6 s
  * „na osobę"; teraz ~17) i okno 300 wierszy w usuwaniu (był pełny log).
+ *
+ * r36 (zgłoszenie właściciela: „desktop po odświeżeniu 0.4.2, telefon
+ * 0.4.0 — wymuszanie aktualnej wersji NIE DZIAŁA, a to KLUCOWE"):
+ * r34 okazało się niewystarczające — trzy niezależne dziury:
+ *  1) CDN GitHub Pages (Fastly) IGNORUJE query-stringi w kluczu cache:
+ *     wersja.json?t=<unikalny> zwracał HIT starego wpisu (pomiar r36),
+ *     więc ani ?t=, ani ?aktualizacja= nie omijały CDN; do tego
+ *     max-age=600 na wszystko = do 10 min starego index.html;
+ *  2) telefon z v0.4.0 wrócił z bfcache — żywy kod STAREJ wersji bez
+ *     mechanizmu sprawdzania (powstał w r34) i bez visibilitychange;
+ *  3) baner „Zaktualizuj teraz" przy zajętej kolejce wisiał bezradnie
+ *     (nikt nie klika), a karta otwarta ciągle nie sprawdzała wcale.
+ * Naprawa: (a) Service Worker sw.js — nawigacje i wersja.json z
+ * {cache:'no-store'} (jedyne prawdziwe obejście cache), (b) pageshow
+ * z persisted=true (bfcache) — throttle resetowany, (c) interwał 60 s
+ * dla karty otwartej non-stop, (d) throttle 20 s, (e) po wyprostowaniu
+ * kolejki auto-reload sam (koniec wiszącego baneru). Na file:// i
+ * przeglądarkach bez SW rejestracja cicho nie wchodzi — model r34
+ * dalej działa (progressive enhancement).
  * ================================================================= */
 
 'use strict';
 
-var WERSJA_UI = 'v0.4.3';
+var WERSJA_UI = 'v0.4.4';
 
 /* r25: najstarsza wersja API (Apps Script), z jaką ta strona umie
  * współpracować. v0.2.4 = akcje grup (dodajGrupe/edytujGrupe/usunGrupe);
@@ -260,8 +279,15 @@ function wisiZapisanaKolejka() {
 
 function sprawdzWersjeStrony() {
   var teraz = Date.now();
-  if (teraz - OSTATNIE_SPRAWDZENIE_WERSJI < 60000) return; // throttle 60 s
+  // r36: throttle 20 s (było 60) — visibilitychange i pageshow potrafią
+  // strzelić podwójnie przy jednym powrocie do apki; anty-pętla i tak
+  // siedzi w przeladujStrone (strażnik 30 s), więc krótszy throttle jest
+  // bezpieczny, a aktualizacja dociera szybciej
+  if (teraz - OSTATNIE_SPRAWDZENIE_WERSJI < 20000) return;
   OSTATNIE_SPRAWDZENIE_WERSJI = teraz;
+  // r36: ?t= zostaje (dla cache przeglądarki), ale prawdziwe omijanie
+  // CDN robi Service Worker (sw.js, {cache:'no-store'}) — Fastly na
+  // GitHub Pages ignoruje query-stringi w kluczu cache (pomiar r36)
   fetch('wersja.json?t=' + teraz, { cache: 'no-store' })
     .then(function (odp) { return odp.ok ? odp.json() : null; })
     .then(function (d) {
@@ -1122,6 +1148,13 @@ function wysylaKolejke() {
       odswiezStan();
     } else {
       wysylaKolejke(); // następna operacja z kolejki
+    }
+    // r36: kolejka się wyprostowała, a wisi baner „dostępna nowa wersja"
+    // (właściciel widział go godzinami, bo nikt nie klikał) → skoro nie
+    // ma już nic do stracenia, przeładowujemy sami — apka ZAWSZE
+    // najnowsza, bez czekania na człowieka
+    if (!S.kolejka.length && !S.wLocie && !S.pauza && S.dostepnaWersja) {
+      przeladujStrone();
     }
   });
 }
@@ -2056,7 +2089,19 @@ function start() {
  * (ten sam zawodnik+dzień → istnialo:true, zero nowego wiersza), tu
  * chodzi o to, by drugi trener WIDZIAŁ stan pierwszego przed tapnięciem.
  * Cisza przy błędzie sieci (patrz odswiezStan); nie odświeżamy w trakcie
- * wysyłki/kolejki (własne zmiany i tak nadejdą z odpowiedzi mutacji). */
+ * wysyłki/kolejki (własne zmiany i tak nadejdą z odpowiedzi mutacji).
+ *
+ * r36 (zgłoszenie właściciela: „odświeżyłem na desktop → 0.4.2, na
+ * telefonie → 0.4.0 — wymuszanie aktualnej wersji NIE DZIAŁA"):
+ *  a) pageshow + persisted — karta wrócona z bfcache (iOS/Android trzyma
+ *     ją w pamięci) NIE strzela visibilitychange; a apka z bfcache to
+ *     żywy kod STAREJ wersji (telefon z v0.4.0 nie miał w ogóle
+ *     mechanizmu sprawdzania — powstał w r34/v0.4.2);
+ *  b) interwał 60 s — karta otwarta non-stop (trening w toku) też ma
+ *     prawo dostać aktualizację bez czekania na zmianę widoczności;
+ *  c) throttle sprawdzeń 60 s → 20 s (visibilitychange + pageshow mogą
+ *     strzelać podwójnie; 20 s wystarcza anty-pętli, bo auto-reload i
+ *     tak ma własnego strażnika 30 s). */
 document.addEventListener('visibilitychange', function () {
   if (document.visibilityState !== 'visible') return;
   sprawdzWersjeStrony();
@@ -2064,3 +2109,38 @@ document.addEventListener('visibilitychange', function () {
     odswiezStan(null, null, null, true);
   }
 });
+
+/* r36a: bfcache — karta przywrócona z pamięci (wstecz/przywrócenie karty
+ * na iOS Safari) wraca BEZ przeładowania: kod apki to wciąż stara wersja,
+ * a visibilitychange często nie strzela. pageshow(persisted=true) to
+ * JEDYNY sygnał takiego powrotu. Robimy to samo co przy visibilitychange. */
+window.addEventListener('pageshow', function (ev) {
+  if (!ev.persisted) return; // zwykłe załadowanie — start() już sprawdzał
+  OSTATNIE_SPRAWDZENIE_WERSJI = 0; // wymuszamy sprawdzenie (throttle minął)
+  sprawdzWersjeStrony();
+  if (TOKEN && S.stan && !S.wLocie && !S.kolejka.length && !S.pauza) {
+    odswiezStan(null, null, null, true);
+  }
+});
+
+/* r36b: karta otwarta ciągle (trening) — kontrola wersji co 60 s nawet
+ * bez zmiany widoczności. Bez tego apka żyjąca kilka godzin nigdy nie
+ * dowie się o nowej wersji. Cisza przy błędach — jak zawsze. */
+setInterval(function () {
+  if (document.visibilityState !== 'visible') return; // ukryta karta: nie pytamy
+  sprawdzWersjeStrony();
+}, 60000);
+
+/* r36c: Service Worker „apka zawsze najnowsza". CDN GitHub Pages (Fastly)
+ * ignoruje query-stringi w kluczu cache (pomiar r36: wersja.json?t=
+ * <unikalny> → HIT wpisu sprzed minut) i wysyła max-age=600 na wszystko —
+ * dlatego ?t=/​?aktualizacja= z r34 omijały co najwyżej cache przeglądarki.
+ * SW przechwytuje nawigacje i wersja.json z {cache:'no-store'} — żądanie
+ * idzie do sieci z pominięciem WSZYSTKICH cache; po publikacji Pages
+ * robi purge CDN. Rejestracja jest cicho pomijana (file://, stare
+ * przeglądarki) — apka działa dalej wg modelu r34. */
+if ('serviceWorker' in navigator) {
+  try {
+    navigator.serviceWorker.register('sw.js').catch(function () { /* cisza */ });
+  } catch (ign) { /* rejestracja nie może zepsuć startu */ }
+}
