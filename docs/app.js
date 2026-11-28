@@ -303,11 +303,29 @@
  *    wcześniejszych wpisów;
  *  - monitor „X/Y" r39 liczył projekcję dnia już ZGODNIE z datą — bez
  *    zmian; teraz zgadza się z nim także kolor kafla.
+ *
+ * r42 (zgłoszenie właściciela: „dodałem jedną osobę i w interfejsie
+ * pojawiły mi się obecności z poprzedniego dnia — należy zapewnić
+ * spójność wyświetlanych danych wg kalendarza"): sesja vs kalendarz.
+ * S.data ustawiał się RAZ (dzisiaj z pierwszego stanu) i nigdy nie
+ * ruszał — apka otwarta przez noc pokazywała rano wczorajszy dzień
+ * z wczorajszymi obecnościami, a dodanie osoby przerysowywało listę,
+ * co ujawniało rozjazd. Naprawa:
+ *  - S.dataRecznie: data wybrana ręcznie (pole #data) jest nietykalna
+ *    dla auto-przeskoku — przeglądanie historii nie może „uciekać";
+ *  - wrocNaDzisiejszyDzien(): powrót do apki (visibilitychange,
+ *    pageshow z bfcache, interwał 60 s karty otwartej) przeskakuje
+ *    na dziś, jeżeli dzień minął i nie wybrano daty ręcznie;
+ *  - pole daty ZNAKUJE dzień ≠ dziś (klasa .data-inna — pomarańczowe
+ *    tło + title „wróć na dziś"); do r42 wyglądało identycznie
+ *    jak bieżący dzień;
+ *  - monitor „X/Y" nie liczy osób z dolaczyl > S.data (spójność
+ *    z listą: kafel takiej osoby nie istnieje w tamtym dniu).
  * ================================================================= */
 
 'use strict';
 
-var WERSJA_UI = 'v0.6.1';
+var WERSJA_UI = 'v0.6.2';
 
 /* r25: najstarsza wersja API (Apps Script), z jaką ta strona umie
  * współpracować. v0.2.4 = akcje grup (dodajGrupe/edytujGrupe/usunGrupe);
@@ -569,8 +587,17 @@ var WYLOGOWANY_WLASNIE = false;
 
 /* ------------------------------------------------ stan aplikacji */
 var S = {
+  /* r42: S.data + dataRecznie. Do r41 data przeglądanego dnia ustawiała
+   * się RAZ (pierwszy stan: dzisiaj z serwera) i już nie ruszała — apka
+   * otwarta przez noc (PWA, karta treningu) pokazywała rano WCZORAJSZY
+   * dzień z wczorajszymi obecnościami; dodanie osoby przerysowywało listę,
+   * więc wyglądało to jak „obecności z poprzedniego dnia pojawiły się
+   * po dodaniu". Teraz: powrót do apki = przeskok na dziś, ale TYLKO
+   * gdy trener nie wybrał daty ręcznie (dataRecznie=true nietykalne do
+   * odświeżenia strony — to świadome przeglądanie historii). */
   stan: null,            // odpowiedź dajStan
   data: '',              // RRRR-MM-DD wybranej daty
+  dataRecznie: false,    // r42: true = trener sam wybrał datę (nie auto-dzisiaj)
   grupa: '*',            // '*' = wszystkie
   sortowanie: 'imie',    // 'imie' | 'nazwisko'
   szukane: '',
@@ -779,7 +806,12 @@ function renderuj() {
       '<div class="rzad1">' +
         '<span class="licznik' + (monitor.wisi ? ' leci' : '') + '" title="Obecni ustawieni (kafle: tap +1, trzy tapy −1) / potwierdzone zapisem w arkuszu. Równe liczby = wszystko przesłane.">' +
           monitorTekst() + '</span>' +
-        '<span class="btn-data"><span class="ikona-data">📅</span><input type="date" class="data-input" id="data" value="' + S.data + '" max="' + lokalnaData(new Date()) + '"></span>' +
+        /* r42: klasa .data-inna wyraźnie znakuje, że przeglądany dzień
+         * to NIE dziś (pomarańczowe tło pola daty + title „wróć na dziś").
+         * Do r42 wyglądało identycznie jak bieżący dzień — główny powód,
+         * dla którego wczorajsze obecności myliły się z dzisiejszymi. */
+        '<span class="btn-data' + (S.data === lokalnaData(new Date()) ? '' : ' data-inna') + '"' +
+          (S.data === lokalnaData(new Date()) ? '' : ' title="Przeglądasz inny dzień niż dzisiaj — dotknij, by wrócić na dziś"') + '><span class="ikona-data">📅</span><input type="date" class="data-input" id="data" value="' + S.data + '" max="' + lokalnaData(new Date()) + '"></span>' +
         '<button class="btn-ikona btn-sort-mobilny" id="btn-sort-k" title="Sortowanie">⇅ ' +
           (S.sortowanie === 'nazwisko' ? 'Nazwisko' : 'Imię') + '</button>' +
         '<button class="btn-ikona btn-szukaj-mobilny" id="btn-szukaj" title="Szukaj">🔍</button>' +
@@ -961,6 +993,10 @@ function monitorPrzesylania() {
   });
   var ustawione = 0;
   S.stan.zawodnicy.forEach(function (z) {
+    // r42: spójność monitora z listą — liczymy tylko osoby, które W DNIU
+    // S.data były już członkami (dolaczyl > S.data = jeszcze nie było
+    // ich na sali; kafel ich nie pokazuje, więc i pill ma się zgodzić).
+    if (z.aktywny && z.dolaczyl && z.dolaczyl > S.data) return;
     var czy = dzien.indexOf(z.id) !== -1;
     if (intencje[z.id] === 'zapiszObecnosc') czy = true;
     if (intencje[z.id] === 'usunObecnosc') czy = false;
@@ -1903,6 +1939,7 @@ function podpinz() {
 
   if (el('data')) el('data').addEventListener('change', function () {
     S.data = this.value || lokalnaData(new Date());
+    S.dataRecznie = true; // r42: świadomy wybór — auto-przeskok na dziś nie rusza
     renderuj();
   });
   /* r37: szukaj ŻYJE tylko w drugim wierszu (rozwijany lupą) — na
@@ -2357,6 +2394,39 @@ function pokazKonfiguracje() {
 }
 
 /* ------------------------------------------------ start */
+/* r42: sesja vs kalendarz. Do r42 data przeglądanego dnia (S.data)
+ * ustawiała się RAZ — dzisiaj z pierwszego stanu — i nigdy nie ruszała.
+ * Apka otwarta przez noc (PWA na telefonie trenera, karta z wczorajszego
+ * treningu) pokazywała rano WCZORAJSZY dzień z wczorajszymi obecnościami:
+ * wszyscy „obecni", a pole daty wyglądająco identycznie jak bieżącego
+ * dnia. Zgłoszenie właściciela („dodałem jedną osobę i w interfejsie
+ * pojawiły mi się obecności z poprzedniego dnia") to właśnie ten stan —
+ * dodanie członka przerysowuje listę, więc wczorajsze kafle „wyszły"
+ * na wierzch.
+ *
+ * Naprawa — trzy zasady:
+ *  1. POWRÓT do apki (odlokowanie telefonu, karta na wierzch, powrót
+ *     z bfcache) = przeskok na dziś, jeżeli dzień minął i trener NIE
+ *     wybrał daty ręcznie. Ręczny wybór (S.dataRecznie) jest nietykalny
+ *     do przeładowania strony — świadome przeglądanie historii nie może
+ *     „uciekać" pod trenerem.
+ *  2. Pole daty ZNAKUJE dzień inny niż dziś (klasa .data-inna: pomarańczowe
+ *     tło, title „wróć na dziś") — koniec z „niepozornym" wyglądem,
+ *     przez który wczorajszy dzień mylił się z dzisiejszym.
+ *  3. Kolejka/wLocie z datą WCAT nie blokują przeskoku: intencje wiążą
+ *     się z datą wpisu (r41), więc po powrocie na dziś kafle rysują się
+ *     z prawdy arkusza dla DNIA DZISIEJSZEGO, a wczorajsze wpisy drenują
+ *     się pod własnymi datami.
+ * Przeskok to zwykłe S.data = dziś + render — prawdę przyniesie cichy
+ * dajStan z tego samego powrotu (hooki poniżej) albo odpowiedź drenażu. */
+function wrocNaDzisiejszyDzien() {
+  if (!S.stan || S.dataRecznie) return; // ręcznie wybrana data: nietykalna
+  var dzis = lokalnaData(new Date());
+  if (S.data === dzis) return;          // nic się nie zmieniło
+  S.data = dzis;
+  renderuj();
+}
+
 function start() {
   // r34: strona = APLIKACJA — najpierw sprawdzamy, czy na GitHub Pages
   // jest nowsza wersja (wersja.json, no-store); user ma się logować
@@ -2416,6 +2486,7 @@ function start() {
  *     tak ma własnego strażnika 30 s). */
 document.addEventListener('visibilitychange', function () {
   if (document.visibilityState !== 'visible') return;
+  wrocNaDzisiejszyDzien(); // r42: minął dzień? wracamy na dziś (chyba że ręcznie wybrano)
   sprawdzWersjeStrony();
   if (TOKEN && S.stan && !S.wLocie && !S.kolejka.length && !S.pauza) {
     odswiezStan(null, null, null, true);
@@ -2428,6 +2499,7 @@ document.addEventListener('visibilitychange', function () {
  * JEDYNY sygnał takiego powrotu. Robimy to samo co przy visibilitychange. */
 window.addEventListener('pageshow', function (ev) {
   if (!ev.persisted) return; // zwykłe załadowanie — start() już sprawdzał
+  wrocNaDzisiejszyDzien();   // r42: minął dzień w bfcache? wracamy na dziś
   OSTATNIE_SPRAWDZENIE_WERSJI = 0; // wymuszamy sprawdzenie (throttle minął)
   sprawdzWersjeStrony();
   if (TOKEN && S.stan && !S.wLocie && !S.kolejka.length && !S.pauza) {
@@ -2456,9 +2528,13 @@ window.addEventListener('resize', function () {
 
 /* r36b: karta otwarta ciągle (trening) — kontrola wersji co 60 s nawet
  * bez zmiany widoczności. Bez tego apka żyjąca kilka godzin nigdy nie
- * dowie się o nowej wersji. Cisza przy błędach — jak zawsze. */
+ * dowie się o nowej wersji. Cisza przy błędach — jak zawsze.
+ * r42: tu też przeskakujemy na dziś po zmianie dnia kalendarzowego —
+ * karta otwarta od wczoraj rano nie strzela visibilitychange, więc bez
+ * tego trener patrzyłby na wczorajszy dzień aż do własnego kliknięcia. */
 setInterval(function () {
   if (document.visibilityState !== 'visible') return; // ukryta karta: nie pytamy
+  wrocNaDzisiejszyDzien(); // r42: minął dzień? dziś (chyba że ręcznie wybrano)
   sprawdzWersjeStrony();
 }, 60000);
 

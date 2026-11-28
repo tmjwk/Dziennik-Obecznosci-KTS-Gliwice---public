@@ -97,6 +97,10 @@
      * węższy padding niż r27; emoji 📅 tylko na dużych ekranach (≥1024px),
      * gdzie nie zabiera miejsca */
     .btn-data { display: flex; align-items: center; gap: 0; background: rgba(255,255,255,.14); color: var(--akcent-c); border: 1px solid rgba(255,255,255,.35); border-radius: 8px; padding: 3px 6px; min-height: 40px; }
+    /* r42: przeglądany dzień ≠ dziś — wyraźny pomarańczowy sygnał
+     * (wczorajszy dzień nie może wyglądać jak bieżący) */
+    .btn-data.data-inna { background: rgba(255,107,53,.22); border-color: #FF6B35; }
+    .btn-data.data-inna .data-input { color: #FFB38A; font-weight: 600; }
     input[type="date"].data-input {
       background: transparent; color: var(--akcent-c); border: none;
       font-size: .8rem; font-family: inherit; min-height: 34px;
@@ -403,7 +407,7 @@
        tam weryfikacja podpisu (Google) + aud (Client ID strony) + biała
        lista w arkuszu. Strona = frontend żyjący na GitHub Pages. -->
   <script src="https://accounts.google.com/gsi/client" async defer></script>
-  <script src="config.js?v=v0.6.1"></script>
-  <script src="app.js?v=v0.6.1"></script>
+  <script src="config.js?v=v0.6.2"></script>
+  <script src="app.js?v=v0.6.2"></script>
 </body>
 </html>
