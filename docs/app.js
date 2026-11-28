@@ -273,7 +273,7 @@
  *
  * r40 (opis kafla od właściciela: „kafel zawiera imię i nazwisko w dwóch
  * wierszach, nic poza tym — o stanie informuje jego kolor"):
- *  - KAFLA = dwa wiersze tekstu. W pierwszym (pogrubionym) klucz
+ *  - Kafel = dwa wiersze tekstu. W pierwszym (pogrubionym) klucz
  *    sortowania: po imieniu „Adam" nad „Nowak", po nazwisku „Nowak" nad
  *    „Adam". Okrąg statusu, znaczki ✓/…/⟲, licznik „2/3", „!" i etykieta
  *    grupy SKASOWANE — przez to kafel jest węższy i niższy, więc w wierszu
