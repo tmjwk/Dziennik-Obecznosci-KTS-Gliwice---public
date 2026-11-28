@@ -13,11 +13,13 @@
      * tmjwk.github.io/kts-gliwice-working-repo-public):
      *  60% neutralne — biel/chmura/mgiełka + grafit/granat/stal,
      *  30% podstawowy — niebieski klubowy #0057B8 (WCAG AA: 6.9:1 z bielą),
-     *  10% akcent — pomarańcz #FF6B35 = PIŁECZKA (favicon klubu) i tylko
-     * kluczowe CTA; funkcjonalne: obecny #16A34A, błąd #DC2626,
-     * info #64748B. Kontrasty: tekst ≥4.5:1, duże/ikony ≥3:1 (audyt
-     * r38_audit_kontrastow.py — spis w WORKLOG r38). Zielony topbar
-     * (#0b6e4f, era v0.1–v0.5) ustąpił niebieskiemu klubowemu. */
+     *  10% akcent — pomarańcz #FF6B35 = PIŁECZKA (favicon klubu); od r40
+     * też WYPEŁNIENIE kafla w trakcie zapisu (funkcjonalne, nie dekoracja).
+     * Funkcjonalne: zielony #166534 (obecność), czerwień #B91C1C (usuwanie
+     * i błąd), info #64748B. Kontrasty: tekst ≥4.5:1, duże/ikony ≥3:1
+     * (audyt r38_audit_kontrastow.py; odcienie kafli — r40_kolory_kafli.py;
+     * spisy w WORKLOG r38 i r40). Zielony topbar (#0b6e4f, era v0.1–v0.5)
+     * ustąpił niebieskiemu klubowemu. */
     :root {
       --tlo: #F5F7FA;         /* 60%: chmura — tło strony */
       --karta: #FFFFFF;       /* 60%: biel — karty/kaflowe */
@@ -26,9 +28,13 @@
       --akcent: #0057B8;      /* 30%: niebieski klubowy */
       --akcent-c: #FFFFFF;    /* tekst na akcencie (6.9:1) */
       --granat: #1A2433;      /* 60%: granat — pill „leci", ciemne panele */
-      --pomarancz: #FF6B35;   /* 10%: piłeczka / wyłącznie kluczowe CTA */
-      --obecny: #16A34A;      /* funkcjonalny: wygrana/obecność */
-      --obecny-ikona: #15803D;/* funkcjonalny ciemniejszy: ✓/ramki na jasnym tle (4.3:1) */
+      --pomarancz: #FF6B35;   /* 10%: piłeczka + kafel w trakcie zapisu (r40) */
+      --pomarancz-ramka: #C2410C; /* obramowanie kafla „zapis" — 4.8:1 z tłem strony (samo wypełnienie ma tylko 2.6:1) */
+      --obecny-tlo: #B9E3C9;  /* kafel obecny (r40; L* 86,7 — jaśniejszy od pomarańczu) */
+      --obecny-ramka: #166534;/* obramowanie kafla obecnego (5.1:1 z wypełnieniem) */
+      --usun: #B91C1C;        /* kafel w trakcie usuwania (L* 40 — najciemniejszy stan) */
+      --usun-ramka: #991B1B;  /* obramowanie kafla „usuwanie" */
+      --obrys-usun: #7F1D1D;  /* obwódka licznika 2/3 („jeszcze jedno tapnięcie usunie") */
       --linia: #DBE3EC;       /* 60%: mgiełka — linie/ramki */
       --blad: #DC2626;        /* funkcjonalny: przegrana/błąd */
       --info: #64748B;        /* funkcjonalny: remis/info */
@@ -51,15 +57,17 @@
       box-shadow: 0 1px 4px rgba(0,0,0,.25);
     }
     /* r37: JEDEN topbar dla wszystkich szerokości (przegląd UI 8 punktów):
-     * licznik „N/M kliknięci" odpycha resztę w prawo, potem kompaktowa
-     * data, sort jednym przyciskiem ⇅, lupa 🔍 (rozwija szukaj w drugim
-     * wierszu) i „👥 Członkowie" (na ≤640px chowane CSS-em — tam od r29
-     * siedzi w pasku na dole ekranu). Bez tytułu „Obecność", bez pola
-     * szukaj w pierwszym wierszu, bez przełącznika A→Z. */
+     * pill monitora odpycha resztę w prawo, potem kompaktowa data, sort
+     * jednym przyciskiem ⇅, lupa 🔍 (rozwija szukaj w drugim wierszu)
+     * i „👥 Członkowie" (na ≤640px chowane CSS-em — tam od r29 siedzi
+     * w pasku na dole ekranu). Bez tytułu „Obecność", bez pola szukaj
+     * w pierwszym wierszu, bez przełącznika A→Z. */
     .topbar .rzad1 { display: flex; align-items: center; gap: 8px; flex-wrap: nowrap; }
-    /* r38: pill MONITORA PRZESYŁANIA — neutralny (mgiełka + grafit,
-     * 13.3:1) gdy nic nie leci; klasa .leci = granat z białym tekstem
-     * (14.6:1) — „coś jeszcze w rurce". Delikatny puls zwraca oko. */
+    /* r39: pill MONITORA OBECNOŚCI „X/Y obecnych" (lewa = ustawieni
+     * lokalnie, prawa = potwierdzeni w arkuszu — patrz monitorPrzesylania
+     * w app.js). Neutralny (mgiełka + grafit, 13.3:1), gdy wszystko
+     * przesłane; klasa .leci = granat z białym tekstem (14.6:1) — „coś
+     * jeszcze w rurce". Delikatny puls zwraca oko. */
     .topbar .licznik {
       margin-right: auto; font-size: .88rem; background: var(--linia);
       color: var(--granat);
@@ -143,98 +151,123 @@
       background: transparent; font-weight: 700;
     }
 
-    /* ---------- lista zawodników: siatka 2–3 kolumny (ekran 9:16) ---------- */
+    /* ---------- lista zawodników: siatka kafli ---------- */
+    /* r40: kafel to dwa słowa, więc kolumna może być wąska — 108 px.
+     * Efekt: 3 kafle w wierszu na telefonach od 360 px (dotąd 2), 6 w pasie
+     * 720 px na desktopie (dotąd 4); kafel ma 56 px wysokości zamiast 76.
+     * Słowo dłuższe niż kolumna: najpierw zmniejsza się czcionka tej linii
+     * (dopasujTekstKafli w app.js), a dopiero skrajnie długie nazwisko
+     * łamie się — z myślnikiem, gdy przeglądarka ma polski słownik
+     * dzielenia (hyphens: auto), inaczej w środku (overflow-wrap);
+     * nigdy nie wychodzi poza kafel. */
+    /* 120 px u dołu = wysokość stopki + luz (stopka jest przyklejona);
+     * gdy wisi dymek błędu, app.js powiększa ten odstęp (patrz .ponow) */
     .lista {
-      padding: 4px 10px 120px; max-width: 720px; margin: 0 auto;
-      display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
-      gap: 8px; align-items: stretch;
+      padding: 4px 8px 120px; max-width: 720px; margin: 0 auto;
+      display: grid; grid-template-columns: repeat(auto-fill, minmax(108px, 1fr));
+      gap: 6px; align-items: stretch;
     }
     .kafel {
-      display: flex; flex-direction: column; align-items: stretch; gap: 2px;
-      background: var(--karta); border: 1px solid var(--linia);
-      border-radius: 12px; padding: 10px 10px 8px; min-height: 76px;
-      cursor: pointer; user-select: none;
-      transition: background .15s, border-color .15s;
-      width: 100%; text-align: left; font-size: 1rem; margin: 0;
+      display: flex; flex-direction: column; justify-content: center;
+      background: var(--karta); color: var(--tekst);
+      border: 1px solid var(--linia); border-radius: 10px;
+      padding: 8px 6px; min-height: 56px; min-width: 0;
+      cursor: pointer; user-select: none; -webkit-user-select: none;
+      transition: background .15s, border-color .15s, color .15s;
+      width: 100%; text-align: left; font-size: .95rem; line-height: 1.25; margin: 0;
     }
-    .kafel:active { background: var(--linia); }
-    .kafel .wiersz-nazwy { display: flex; align-items: center; gap: 8px; }
-    .kafel .nazwa { flex: 1 1 auto; overflow: hidden; }
-    .kafel .nazwa b { font-size: .95rem; display: block; line-height: 1.15; overflow-wrap: anywhere; }
-    .kafel .status {
-      flex: 0 0 auto; width: 30px; height: 30px; border-radius: 50%;
-      border: 2px solid var(--linia); color: transparent;
-      display: flex; align-items: center; justify-content: center;
-      font-size: 1rem; font-weight: 700;
+    /* naciśnięcie: przyciemnienie działa na każdym wypełnieniu (białym,
+     * zielonym, pomarańczowym, czerwonym) — stąd filtr, nie kolor tła */
+    .kafel:active { filter: brightness(.93); }
+    .kafel .nazwa { display: block; min-width: 0; }
+    .kafel .nazwa b, .kafel .nazwa span {
+      display: block; overflow-wrap: anywhere;
+      hyphens: auto; -webkit-hyphens: auto;
     }
-    .kafel .status.usun { width: auto; padding: 0 8px; border-radius: 999px; font-size: .68rem; }
-    .kafel .grupa-etykieta {
-      font-size: .7rem; color: var(--szary); text-align: right;
-      white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
-    }
-    /* r38: kafel obecny — 60% neutralne + funkcjonalna zieleń. Tło
-     * #DCF3E4 (jasna zieleń z palety neutralnej strony klubu), ikona/
-     * ramka #15803D (cieleniejszy wariant wygranej — 4.3:1 na DCF3E4,
-     * ikona ≥3:1 OK; tekst labelki to grafit/stal jak wszędzie). */
-    .kafel.obecny { background: #DCF3E4; border-color: var(--obecny-ikona); }
-    .kafel.obecny .status { background: var(--obecny-ikona); border-color: var(--obecny-ikona); color: #fff; }
-    .kafel.potwierdz .status { background: var(--blad); border-color: var(--blad); color: #fff; font-size: .78rem; }
-    .kafel.potwierdz { border-color: var(--blad); background: #FDEAEA; }
-    /* r33: kropka „…" kafla czekającego WIDOCZNA — do v0.4.0 .status
-     * dziedziczył color:transparent (bazowy krąg) i „…" nie było
-     * w ogóle widać; teraz przerywana ramka + znak w akcencie.
-     * r38: kropka w niebieskim klubowym (30%) — „leci do arkusza". */
-    .kafel.synchronizacja .status {
-      border-style: dashed; border-color: var(--akcent);
-      color: var(--akcent); background: var(--tlo);
-    }
-    .kafel.blad { border-width: 2px; }
+    /* pomiar szerokości naturalnej słowa (dopasujTekstKafli): przez moment
+     * bez zawijania, żeby odczytać, ile tekstu naprawdę potrzebuje */
+    .lista.pomiar .kafel .nazwa b, .lista.pomiar .kafel .nazwa span { white-space: nowrap; }
 
-    /* ---------- r32: maszyna stanów kafla (model pesymistyczny) ----------
-     * W LOCIE = blokada transakcji: kafel nieczuły (disabled), wygaszony,
-     * status pulsuje (użytkownik widzi „pracuję", a nie „zawieszony").
-     * W KOLEJCE = kropka przerywana, kafel klikalny (zmiana zdania).
-     * BŁĄD = czerwony błysk statusu (wygasa sam, patrz BLYK_BLEDU_MS). */
+    /* ---------- r40: STANY KAFLA — wypełnienie niesie stan ----------
+     *  biały         nieobecny, nic nie czeka          (prawda arkusza)
+     *  zielony       obecny                            (prawda arkusza)
+     *  pomarańczowy  zapis obecności leci/czeka w kolejce
+     *  czerwony      usunięcie obecności leci/czeka w kolejce
+     * Odcienie dobrane skryptem r40_kolory_kafli.py: kolejne stany różnią
+     * się JASNOŚCIĄ (L* 100 / 87 / 63 / 40), więc da się je uporządkować
+     * bez rozpoznawania barw (ślepota barwna czerwono-zielona, słabe
+     * światło, monochromatyczny ekran) — pary sąsiednie ≥ dE 15 także po
+     * symulacji deuteranopii i protanopii. Tekst: grafit na bieli, zieleni
+     * i pomarańczu (≥ 6.1:1), biały na czerwoni (6.5:1).
+     * Kolejność reguł ma znaczenie: zapis/usun NADPISUJĄ zielony kafel
+     * obecny, bo od tapnięcia do odpowiedzi serwera kafel mówi, co się
+     * dzieje (intencja), a nie to, co jest w arkuszu. */
+    .kafel.obecny { background: var(--obecny-tlo); border-color: var(--obecny-ramka); }
+    .kafel.zapis  { background: var(--pomarancz); border-color: var(--pomarancz-ramka); }
+    .kafel.usun   { background: var(--usun); border-color: var(--usun-ramka); color: #FFFFFF; }
+
+    /* W LOCIE (wpis właśnie leci): kafel nieczuły (disabled), a o pracy
+     * informuje pulsująca obwódka w kolorze intencji — kafel zachowuje
+     * pełną wyrazistość (do v0.5 było wygaszenie opacity .55). Obwódka
+     * rośnie do 4 px, czyli mniej niż odstęp między kaflami (6 px). */
+    .kafel.zapis { --obwodka: 255, 107, 53; }
+    .kafel.usun  { --obwodka: 185, 28, 28; }
     .kafel.wlocie {
-      opacity: .55; cursor: wait; pointer-events: none;
+      cursor: wait; pointer-events: none;
+      box-shadow: 0 0 0 3px rgba(var(--obwodka), .45);
       animation: kafel-puls 1.1s ease-in-out infinite;
     }
-    .kafel.wlocie .status {
-      border-color: var(--akcent); color: var(--akcent);
-      animation: status-puls 1.1s ease-in-out infinite;
-    }
-    /* r38: usuwanie w locie — ikona czerwona (funkcjonalna „przegrana"
-     * #DC2626, 4.2:1 na jasnym tle) — spójnie z .potwierdz i .blad */
-    .kafel.wlocie-usun .status { border-color: var(--blad); color: var(--blad); }
-    /* obecny+wlocie: kafel ZOSTAJE zielony (prawda arkusza), puls i
-     * wygaszenie sygnalizują blokadę — kolejność reguł ma znaczenie */
-    .kafel.wlocie.obecny { background: #DCF3E4; border-color: var(--obecny-ikona); }
     @keyframes kafel-puls {
-      0%, 100% { opacity: .55; }
-      50% { opacity: .8; }
+      0%, 100% { box-shadow: 0 0 0 0 rgba(var(--obwodka), .6); }
+      50% { box-shadow: 0 0 0 4px rgba(var(--obwodka), .3); }
     }
-    @keyframes status-puls {
-      0%, 100% { transform: scale(1); }
-      50% { transform: scale(1.18); }
+    /* .synchronizacja (czeka w kolejce, kafel klikalny) nie ma własnego
+     * rysunku: to ten sam kolor co „w locie", tylko bez obwódki i pulsu. */
+
+    /* LICZNIK USUWANIA UZBROJONY (2 z 3 tapów): ciemnoczerwona obwódka
+     * WEWNĘTRZNA na kolorze kafla — widoczna na zieleni, pomarańczu i
+     * bieli (≥ 3.5:1 z każdym z nich). Znika po 2 s bez tapa albo 3. tapem
+     * (wtedy kafel robi się czerwony). */
+    .kafel.potwierdz { box-shadow: inset 0 0 0 3px var(--obrys-usun); }
+
+    /* BŁĄD operacji (sieć/biznesowy): kafel od razu wraca do koloru prawdy
+     * arkusza, a czerwona poświata gaśnie w ciągu BLYK_BLEDU_MS. Czerwony
+     * STAŁY kafel znaczy „usuwanie", więc błąd nie może sobie go
+     * przywłaszczyć — kto i co poszło nie tak, mówi snackbar „Ponów". */
+    .kafel.blad { animation: kafel-blad .8s ease-out 1; }
+    @keyframes kafel-blad {
+      from { box-shadow: inset 0 0 0 200px rgba(220, 38, 38, .5); }
+      to   { box-shadow: inset 0 0 0 200px rgba(220, 38, 38, 0); }
     }
-    /* redukcja ruchu (a11y): puls dla ruchliwo jest zbędny */
+    /* redukcja ruchu (a11y): zamiast pulsu stała obwódka „w locie",
+     * zamiast gasnącej poświaty stała czerwona ramka błędu (grubsza niż
+     * obwódka licznika, żeby się nie myliły) */
     @media (prefers-reduced-motion: reduce) {
-      .kafel.wlocie, .kafel.wlocie .status { animation: none; }
+      .kafel.wlocie { animation: none; }
+      .kafel.blad { animation: none; box-shadow: inset 0 0 0 5px var(--blad); }
     }
-    .kafel.blad .status {
-      background: var(--blad); border-color: var(--blad); color: #fff;
-    }
-    .kafel.blad { border-color: var(--blad); background: #FDEAEA; }
 
     /* ---------- dymek „Ponów" ---------- */
+    /* r40: SNACKBAR nad stopką. Do v0.5 był ostatnim wierszem siatki —
+     * przy długiej liście wisiał poniżej ekranu, a o błędzie mówił
+     * głównie znacznik na kaflu („!" przez 3 s). Od r40 kafel po błędzie
+     * od razu wraca do koloru prawdy (krótki błysk), więc o błędzie musi
+     * mówić dymek — i to tam, gdzie użytkownik go zobaczy: przypięty nad
+     * stopką niezależnie od przewinięcia listy. Dolny odstaw ustawia
+     * dymekBledu() wg wysokości stopki; a żeby dymek niczego trwale nie
+     * zasłaniał, lista dostaje wtedy tyle miejsca u dołu, by dało się
+     * przewinąć wszystkie kafle ponad niego (dopasujMiejscePodDymkiem). */
     .ponow {
-      grid-column: 1 / -1;
-      margin: 8px 0 0; padding: 10px 12px; border-radius: 10px;
-      background: #FDEAEA; border: 1px solid var(--blad); color: var(--blad);
+      position: fixed; left: 50%; transform: translateX(-50%);
+      width: min(720px, calc(100% - 16px)); z-index: 11;
+      margin: 0; padding: 10px 12px; border-radius: 10px;
+      background: #FDEAEA; border: 1px solid var(--blad); color: var(--tekst);
       font-size: .9rem; display: flex; gap: 10px; align-items: center;
+      box-shadow: 0 4px 14px rgba(15, 27, 45, .18);
     }
+    .ponow span { flex: 1 1 auto; min-width: 0; overflow-wrap: anywhere; }
     .ponow button {
-      margin-left: auto; background: var(--blad); color: #fff; border: none;
+      flex-shrink: 0; background: var(--blad); color: #fff; border: none;
       border-radius: 8px; padding: 8px 14px; font-size: .9rem; cursor: pointer;
     }
 
@@ -369,7 +402,7 @@
        tam weryfikacja podpisu (Google) + aud (Client ID strony) + biała
        lista w arkuszu. Strona = frontend żyjący na GitHub Pages. -->
   <script src="https://accounts.google.com/gsi/client" async defer></script>
-  <script src="config.js?v=v0.5.2"></script>
-  <script src="app.js?v=v0.5.2"></script>
+  <script src="config.js?v=v0.6.0"></script>
+  <script src="app.js?v=v0.6.0"></script>
 </body>
 </html>
