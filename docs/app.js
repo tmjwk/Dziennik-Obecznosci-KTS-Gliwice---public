@@ -287,11 +287,27 @@
  *    pesymistyczny r32 bez zmian) — zmienił się rysunek, nie dane;
  *  - odcienie dobrane skryptem r40_kolory_kafli.py: kolejne stany różnią
  *    się jasnością, tekst ≥ 6:1 na każdym wypełnieniu.
+ *
+ * r41 („kolejka nie rozróżnia dat" — wada zgłoszona właścicielowi po r40,
+ * odtworzona w scripts/r40_repro_data_w_kolejce.py): wszystkie mapy
+ * intencji dostały klucz 'id|data' — PARĘ (zawodnik, dzień), zamiast
+ * samego id:
+ *  - zakolejkuj: koalescing tylko w obrębie JEDNEGO dnia — tapy w dniu B
+ *    nie nadpisują już czekającego wpisu dnia A (ten leci osobno);
+ *  - tapZawodnika: blokada „w locie" i semantyka tapu (projekcja stanu
+ *    po drenażu) liczą się z intencji TEGO DNIA; wpis innego dnia w locie
+ *    nie blokuje kafla;
+ *  - kafelHtml: kolor intencji (S.wisiace), licznik 3-tapów (S.tapy),
+ *    obwódka „potwierdz" i błysk błędu (S.bledyKafli) — per dzień;
+ *    trener może odhaczać kilka dni pod rząd, nie czekając na rozliczenie
+ *    wcześniejszych wpisów;
+ *  - monitor „X/Y" r39 liczył projekcję dnia już ZGODNIE z datą — bez
+ *    zmian; teraz zgadza się z nim także kolor kafla.
  * ================================================================= */
 
 'use strict';
 
-var WERSJA_UI = 'v0.6.0';
+var WERSJA_UI = 'v0.6.1';
 
 /* r25: najstarsza wersja API (Apps Script), z jaką ta strona umie
  * współpracować. v0.2.4 = akcje grup (dodajGrupe/edytujGrupe/usunGrupe);
@@ -559,24 +575,34 @@ var S = {
   sortowanie: 'imie',    // 'imie' | 'nazwisko'
   szukane: '',
   trybCzlonkowie: false, // czy otwarty widok członków
-  tapy: {},              // { idZawodnika: {n: liczba tapów, t: timestamp} }
-  timery: {},            // timery resetu tapów per zawodnik
-  wisiace: {}            // { idZawodnika: 'zapis'|'usun' } — wyliczane
+  /* r41: kluczem intencji jest PARA (zawodnik, dzień) — „id|data". Do r40
+   * mapy były po samym id, więc intencja z INNEGO dnia „prześwitywała"
+   * na kafel w dniu przeglądanym (pomarańczowy bez powodu) i KOALESCOWAŁA
+   * z intencją dnia bieżącego (zapis dnia A nadpisywany przez tapy
+   * w dniu B). Uwaga na F5: data w kluczu żyje tak krótko jak intencja,
+   * więc po powrocie kolejka i licznik rozjechałyby się datą — dlatego
+   * wisiace/tapy/bledyKafli są POCHODNE (sync z kolejki) albo ulotne
+   * (licznik tapów i błysk błędu giną z przeładowaniem, z założenia). */
+  tapy: {},              // { 'id|RRRR-MM-DD': {n: liczba tapów, t: timestamp} }
+  timery: {},            // timery resetu tapów per 'id|data'
+  wisiace: {}            // { 'id|RRRR-MM-DD': 'zapis'|'usun' } — wyliczane
   /* r32: { idZawodnika: timestamp } — kafel, którego OSTATNIA operacja
    * padła (sieć/biznesowy). Przez BLYK_BLEDU_MS od tego momentu kafelHtml
    * dorysowuje krótki czerwony błysk wypełnienia (klasa .blad), potem
    * znika (render po timerze). Wypełnienie kafla to przez cały czas prawda z arkusza —
    * błysk to tylko sygnał „coś nie wyszło"; KTO i CO opisuje dymek
-   * „Ponów" (opisBleduObecnosci). */
+   * „Ponów" (opisBleduObecnosci). r41: klucz 'id|data' — błysk dotyczy
+   * operacji konkretnego DNIA (wpis z kolejki), nie zawodnika w ogóle. */
   , bledyKafli: {}
   /* r30: kolejka FIFO obecności (ustalenie B z rundy 30). Intencje lecą
    * do serwera PO JEDNEJ (jedna w locie), w kolejności tapnięć — koniec
-   * z równoległymi żądaniami, które serwer i tak serializuje LockService'm
-   * (waitLock(10 s) potrafił wybuchnąć przy serii szybkich tapnięć),
-   * a odpowiedzi wracały w złej kolejności i nadpisywały stan starszą
-   * odpowiedzią. Koalescing per zawodnik: tapnięcie tej samej osoby
-   * nadpisuje jej NIEWYSŁANY wpis (ostatnia intencja wygrywa); kafel
-   * „w locie" jest zablokowany — jego tap jest ignorowany (tapZawodnika).
+ * z równoległymi żądaniami, które serwer i tak serializuje LockService'm
+ * (waitLock(10 s) potrafił wybuchnąć przy serii szybkich tapnięć),
+ * a odpowiedzi wracały w złej kolejności i nadpisywały stan starszą
+ * odpowiedzią. Koalescing per (zawodnik, dzień) — r41: tapnięcie tej
+ * samej osoby W TYM SAMYM DNIU nadpisuje jej NIEWYSŁANY wpis (ostatnia
+ * intencja wygrywa); wpis innego dnia zostaje. Kafel „w locie" jest
+ * zablokowany — jego tap jest ignorowany (tapZawodnika).
    * Błąd pojedynczej operacji = powrót tego kafla do prawdy arkusza +
    * dymek „Ponów", kolejka leci
    * dalej. „wisiace" jest odtąd WYLICZANE z kolejki+wLocie (pomocnicze
@@ -998,13 +1024,14 @@ function czyWaski() {
 var BLYK_BLEDU_MS = 800;
 
 function kafelHtml(z) {
+  var klucz = z.id + '|' + S.data; // r41: intencje liczone per (zawodnik, dzień)
   var dzien = S.stan.obecnosci[S.data] || [];
   var obecny = dzien.indexOf(z.id) !== -1;
-  var tap = S.tapy[z.id];
-  var wisi = S.wisiace[z.id]; // 'zapis' | 'usun' — intencja czeka albo leci
-  var tenWLocie = !!(S.wLocie && S.wLocie.id === z.id);
+  var tap = S.tapy[klucz];
+  var wisi = S.wisiace[klucz]; // 'zapis' | 'usun' — intencja czeka albo leci
+  var tenWLocie = !!(S.wLocie && S.wLocie.id === z.id && S.wLocie.data === S.data);
   var uzbrojony = !!(tap && tap.n >= 2);
-  var bladNiedawno = !!(S.bledyKafli[z.id] && Date.now() - S.bledyKafli[z.id] < BLYK_BLEDU_MS);
+  var bladNiedawno = !!(S.bledyKafli[klucz] && Date.now() - S.bledyKafli[klucz] < BLYK_BLEDU_MS);
 
   var klasy = 'kafel';
   if (obecny) klasy += ' obecny';
@@ -1059,24 +1086,28 @@ function dymekBledu() {
 
 /* tap w kafel — r32: model pesymistyczny („stany przycisku", ustalone
  * w rundzie 32). JEDNO TAPNIĘCIE = JEDNA pełna transakcja z potwierdzeniem
- * arkusza; kolejna transakcja tej samej osoby startuje dopiero po
- * rozliczeniu poprzedniej. NIEOBECNY: 1 tap → zapis → (blokada w locie)
- * → zielony po potwierdzeniu. OBECNY: tapy 1/3 i 2/3 to licznik LOKALNY
- * (serwer nie ma czego zapisywać dla licznika — zero zbędnych rund),
- * tap 3/3 → usunięcie → (blokada) → powrót do NIEOBECNY (stan początkowy,
- * pełny cykl). Szybkie stuk-stuk-stuk na nieobecnym da JEDEN zapis (dwa
- * pozostałe tapy zignorowane w blokadzie) — dokładnie zamierzone.
- * Kafel czekający w KOLEJCE (pauza sesji/arkusza, wpisy niewysłane)
- * pozostaje klikalny: zmiana zdania offline = koalescing czekającego
- * wpisu (jedno żądanie zamiast dwóch). */
+ * arkusza; kolejna transakcja tej samej osoby W TYM SAMYM DNIU (r41)
+ * startuje dopiero po rozliczeniu poprzedniej. NIEOBECNY: 1 tap → zapis
+ * → (blokada w locie) → zielony po potwierdzeniu. OBECNY: tapy 1/3 i 2/3
+ * to licznik LOKALNY (serwer nie ma czego zapisywać dla licznika — zero
+ * zbędnych rund), tap 3/3 → usunięcie → (blokada) → powrót do NIEOBECNY
+ * (stan początkowy, pełny cykl). Szybkie stuk-stuk-stuk na nieobecnym da
+ * JEDEN zapis (dwa pozostałe tapy zignorowane w blokadzie) — dokładnie
+ * zamierzone. Kafel czekający w KOLEJCE (pauza sesji/arkusza, wpisy
+ * niewysłane) pozostaje klikalny: zmiana zdania offline = koalescing
+ * czekającego wpisu TEGO DNIA (jedno żądanie zamiast dwóch). */
 function tapZawodnika(z) {
+  var klucz = z.id + '|' + S.data; // r41: intencje per (zawodnik, dzień)
   var dzien = S.stan.obecnosci[S.data] || [];
 
-  // r32: BLOKADA LOGICZNA — wpis tej osoby jest W LOCIE → tap ignorowany.
+  // r32: BLOKADA LOGICZNA — wpis tej osoby W LOCIE → tap ignorowany.
+  // r41: tylko gdy leci wpis TEGO DNIA (w locie jest {id, akcja, data}).
+  // Wpis innego dnia nie blokuje kafla w dniu przeglądanym — poniżej
+  // brany jest pod uwagę wyłącznie przy liczeniu kolejki.
   // To zabezpieczenie w samej obsłudze zdarzenia (disabled w HTML to
   // tylko prezentacja: zdarzenia potrafią przyjść z klawiatury czy z
   // podwójnego triggera touch+click). Inne kafle nie są blokowane.
-  if (S.wLocie && S.wLocie.id === z.id) return;
+  if (S.wLocie && S.wLocie.id === z.id && S.wLocie.data === S.data) return;
 
   // r32: SEMANTYKA tapnięcia liczy się z czekającą intencją (projekcja
   // stanu po drenażu kolejki) — tak samo jak kolor kafla od r40:
@@ -1085,8 +1116,10 @@ function tapZawodnika(z) {
   // użytkownika było jego usunięcie i zmiana zdania musi to odwrócić.
   // Bez tego nie dałoby się anulować czekającego usun (3 tapy znów
   // zakolejkowałyby usun zamiast przywrócić zapis).
+  // r41: projekcja liczy intencję TEGO DNIA — czekające wpisy innych
+  // dni (np. z pauzy sieci) nie zmieniają znaczenia tapu w dniu widocznym.
   var wKolejce = null;
-  S.kolejka.forEach(function (w) { if (w.id === z.id) wKolejce = w; });
+  S.kolejka.forEach(function (w) { if (w.id === z.id && w.data === S.data) wKolejce = w; });
   var efektywnieObecny = dzien.indexOf(z.id) !== -1;
   if (wKolejce) efektywnieObecny = (wKolejce.akcja === 'zapiszObecnosc');
 
@@ -1100,16 +1133,19 @@ function tapZawodnika(z) {
     return;
   }
 
-  // obecny (potwierdzony albo z czekającym zapisem) → licznik do 3
-  var tap = S.tapy[z.id] || { n: 0, t: 0 };
+  // obecny (potwierdzony albo z czekającym zapisem) → licznik do 3;
+  // r41: licznik żyje w ramach DNIA (klucz 'id|data') — trener może
+  // odhaczać kilka dni pod rząd, nie czekając, aż w locie rozliczy się
+  // wpisy dnia poprzedniego.
+  var tap = S.tapy[klucz] || { n: 0, t: 0 };
   tap.n += 1;
   tap.t = Date.now();
-  S.tapy[z.id] = tap;
-  if (S.timery[z.id]) clearTimeout(S.timery[z.id]);
+  S.tapy[klucz] = tap;
+  if (S.timery[klucz]) clearTimeout(S.timery[klucz]);
   if (tap.n < 3) {
-    S.timery[z.id] = setTimeout(function () {
-      delete S.tapy[z.id];
-      delete S.timery[z.id];
+    S.timery[klucz] = setTimeout(function () {
+      delete S.tapy[klucz];
+      delete S.timery[klucz];
       renderuj();
     }, 2000);
     renderuj();
@@ -1119,9 +1155,9 @@ function tapZawodnika(z) {
   // 3 tapy → usuń; r32: bez optymistycznego splice — w S.stan zawodnik
   // jest obecny do potwierdzenia usunięcia z arkusza (kafel w tym czasie
   // czerwony)
-  delete S.tapy[z.id];
-  clearTimeout(S.timery[z.id]);
-  delete S.timery[z.id];
+  delete S.tapy[klucz];
+  clearTimeout(S.timery[klucz]);
+  delete S.timery[klucz];
   zakolejkuj(z.id, 'usunObecnosc');
   renderuj();
   wysylaKolejke();
@@ -1129,20 +1165,24 @@ function tapZawodnika(z) {
 
 /* ------------------------------------------------ r30: kolejka FIFO obecności */
 
-/* Koalescing per zawodnik: nowa intencja tej samej osoby ZASTĘPUJE jej
- * niewysłany wpis (ostatnia intencja wygrywa — po co wysyłać zapis, który
- * zaraz trzeba cofać usunięciem). Wpisu W LOCIE nie da się wycofać, ale
- * też nie ma czego zmieniać: kafel tej osoby jest zablokowany do czasu
- * rozliczenia (tapZawodnika ignoruje tap), więc drugi wpis tej samej
- * osoby nigdy nie trafia do kolejki obok pierwszego.
+/* Koalescing per (zawodnik, dzień): nowa intencja tej samej osoby
+ * W TYM SAMYM DNIU zastępuje jej niewysłany wpis (ostatnia intencja
+ * wygrywa — po co wysyłać zapis, który zaraz trzeba cofać usunięciem).
+ * r41: wpis z INNEGO dnia jest odrębną intencją i NIE jest dotykany —
+ * do v0.6.0 dopasowanie szło po samym id, więc tapy w dniu B nadpisywały
+ * czekający wpis dnia A (w arkuszu dnia A tej osoby nie było i nic
+ * o tym nie mówiło; patrz repro r40_repro_data_w_kolejce.py). Wpisu
+ * W LOCIE nie da się wycofać, ale też nie ma czego zmieniać: kafel tej
+ * osoby w tym dniu jest zablokowany do czasu rozliczenia (tapZawodnika
+ * ignoruje tap), więc drugi wpis tej samej pary nigdy nie trafia do
+ * kolejki obok pierwszego.
  * r31: wpis wie, pod jaką datą tapnięto (S.data z chwili tapnięcia),
  * a zmiana jest od razu w localStorage. */
 function zakolejkuj(id, akcja) {
   var podmieniony = false;
   for (var i = 0; i < S.kolejka.length; i++) {
-    if (S.kolejka[i].id === id) {
+    if (S.kolejka[i].id === id && S.kolejka[i].data === S.data) { // r41: para (id, data)
       S.kolejka[i].akcja = akcja;
-      S.kolejka[i].data = S.data;
       podmieniony = true;
       break;
     }
@@ -1159,20 +1199,25 @@ function zakolejkuj(id, akcja) {
   zsynchronizujWisiace();
 }
 
-/* Utrzymuje S.wisiace zgodne z kolejką+wLocie: { id: 'zapis'|'usun' }.
+/* Utrzymuje S.wisiace zgodne z kolejką+wLocie: { 'id|data': 'zapis'|'usun' }.
  * To z tej mapy kafelHtml bierze kolor intencji (wypełnienie kafla);
  * informację „leci czy czeka" daje osobno S.wLocie (klasa .wlocie).
+ * r41: klucz to PARA (zawodnik, dzień) — kafel w przeglądanym dniu
+ * koloruje wyłącznie intencja TEGO dnia; wpisy innych dni (wiszące
+ * w pauzie sieci) czekają na swój dzień i nikogo tu nie kolorują.
  * r33: syncuje ją też zakolejkuj() — kolor nowego wpisu pojawia się
  * w TYM SAMYM ticku co tapnięcie, nawet gdy inny wpis jest w locie
  * (do v0.4.0 robiła to tylko pętla wysyłki, która przy wpisie w locie
  * wychodziła wcześnie → kafel drugiej osoby był „niemy" aż do
- * rozliczenia pierwszej — objaw zgłoszony przez właściciela w r33). */
+ * rozliczenia pierwszego — objaw zgłoszony przez właściciela w r33). */
 function zsynchronizujWisiace() {
   S.wisiace = {};
-  if (S.wLocie) S.wisiace[S.wLocie.id] = S.wLocie.akcja === 'usunObecnosc' ? 'usun' : 'zapis';
+  if (S.wLocie) S.wisiace[S.wLocie.id + '|' + S.wLocie.data] =
+    S.wLocie.akcja === 'usunObecnosc' ? 'usun' : 'zapis';
   S.kolejka.forEach(function (wpis) {
-    if (!S.wisiace[wpis.id]) {
-      S.wisiace[wpis.id] = wpis.akcja === 'usunObecnosc' ? 'usun' : 'zapis';
+    var klucz = wpis.id + '|' + wpis.data;
+    if (!S.wisiace[klucz]) {
+      S.wisiace[klucz] = wpis.akcja === 'usunObecnosc' ? 'usun' : 'zapis';
     }
   });
   // r31: wisi nakładka „Sesja wygasła"? odświeżamy licznik oczekujących
@@ -1278,7 +1323,7 @@ function wysylaKolejke() {
     // jedyny świadomy „zaleg" w LS to wpis W LOCIE (patrz shift wyżej —
     // bez zapisu po zdjęciu z kolejki: F5 w locie = ponowienie).
     if (e) {
-      domknijKafelPoBledzie(wpis.id);
+      domknijKafelPoBledzie(wpis);
       zapiszKolejke();
       S.bladAkcji = opisBleduObecnosci(wpis, e.message);
       zsynchronizujWisiace();
@@ -1290,7 +1335,7 @@ function wysylaKolejke() {
     if (!w.ok) {
       // błąd biznesowy tej operacji: kafel do prawdy arkusza + dymek;
       // reszta leci.
-      domknijKafelPoBledzie(wpis.id);
+      domknijKafelPoBledzie(wpis);
       zapiszKolejke(); // r31: jw. — rozliczony wpis znika i z LS
       S.bladAkcji = opisBleduObecnosci(wpis, (w && w.opis) || w.blad || 'Nieznany błąd');
       zsynchronizujWisiace();
@@ -1365,18 +1410,20 @@ function wysylaKolejke() {
  * było tu odwracać lokalne znaczenie (cofnijOptymizm) — teraz stan
  * lokalny nigdy nie odjeżdża od arkusza, więc wystarcza domknięcie
  * UI: krótki czerwony błysk wypełnienia (klasa .blad, wygasa sam po
- * BLYK_BLEDU_MS),
- * zdjęcie licznika, dymek (ustawia wywołujący). */
-function domknijKafelPoBledzie(id) {
-  delete S.tapy[id]; // licznik 3-tapów nie ma już sensu
-  delete S.wisiace[id];
-  if (S.timery[id]) { clearTimeout(S.timery[id]); delete S.timery[id]; }
-  S.bledyKafli[id] = Date.now();
+ * BLYK_BLEDU_MS), zdjęcie licznika, dymek (ustawia wywołujący).
+ * r41: klucz map = 'id|data' z ROZLICZANEGO WPISU (błąd dotyczy
+ * operacji konkretnego dnia — licznik dnia bieżącego zostaje). */
+function domknijKafelPoBledzie(wpis) {
+  var klucz = wpis.id + '|' + wpis.data;
+  delete S.tapy[klucz]; // licznik 3-tapów nie ma już sensu
+  delete S.wisiace[klucz];
+  if (S.timery[klucz]) { clearTimeout(S.timery[klucz]); delete S.timery[klucz]; }
+  S.bledyKafli[klucz] = Date.now();
   setTimeout(function () {
     // wygaszenie błysku .blad — render tylko gdy wpis jeszcze tam jest
     // (user mógł w międzyczasie zmienić zdanie i mieć nową intencję)
-    if (S.bledyKafli[id] && Date.now() - S.bledyKafli[id] >= BLYK_BLEDU_MS - 50) {
-      delete S.bledyKafli[id];
+    if (S.bledyKafli[klucz] && Date.now() - S.bledyKafli[klucz] >= BLYK_BLEDU_MS - 50) {
+      delete S.bledyKafli[klucz];
       if (S.stan && S.stan.obecnosci) renderuj();
     }
   }, BLYK_BLEDU_MS + 60);
